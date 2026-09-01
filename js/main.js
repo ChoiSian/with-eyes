@@ -44,11 +44,15 @@ function ensureAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     } catch { /* 소리 없이 진행 */ }
   }
+  // iOS: 사용자 제스처 시점에 오디오/음성합성 잠금 해제
+  audioCtx?.resume?.();
+  state.tts.unlock();
 }
 
 function tone(freq, ms = 120, gainVal = 0.06) {
   if (!audioCtx) return;
   try {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.frequency.value = freq;
@@ -811,8 +815,22 @@ async function runPractice() {
   }
 }
 
+// 사용 중 화면이 꺼지지 않게 (모바일/태블릿)
+let wakeLock = null;
+async function acquireWakeLock() {
+  try {
+    wakeLock = await navigator.wakeLock?.request('screen');
+  } catch { /* 지원 안 되면 무시 */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.screen === 'screen-main') {
+    acquireWakeLock();
+  }
+});
+
 function enterMain() {
   showScreen('screen-main');
+  acquireWakeLock();
   const cam = $('#camera');
   const mini = $('#mini-cam');
   if (cam.srcObject) {
@@ -980,6 +998,7 @@ async function startWithCamera() {
   wireSetupStatus(tracker);
   bindGazeVisuals(tracker);
   tracker.start();
+  acquireWakeLock();
   if (tracker.loadStoredCalibration()) {
     $('#btn-skip-calib').style.display = '';
   }
@@ -996,7 +1015,7 @@ function startWithKeyboard() {
   $('#track-dot').classList.add('ok');
   $('#track-label').textContent = '키보드 모드';
   enterMain();
-  toast('Space/↑ = 선택(위 응시), Backspace = 되돌리기, P = 쉬기', 5000);
+  toast('선택 = Space/↑ 또는 화면 탭 · 되돌리기 = Backspace 또는 길게 누르기 · 쉬기 = P', 6000);
 }
 
 function boot() {

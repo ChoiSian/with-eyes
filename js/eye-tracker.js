@@ -283,7 +283,12 @@ export class EyeTracker extends EventTarget {
   async init(video) {
     this.video = video;
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      video: {
+        facingMode: 'user', // 모바일에서 후면 카메라가 잡히지 않도록 전면 지정
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 },
+      },
       audio: false,
     });
     video.srcObject = stream;
@@ -726,19 +731,23 @@ export class EyeTracker extends EventTarget {
   }
 }
 
-// 카메라 없이 키보드로 테스트하는 대체 입력기 (같은 이벤트 인터페이스)
-// Space/Enter/↑ = 위 응시(선택), Backspace = 되돌리기, P = 쉬기
+// 카메라 없이 테스트하는 대체 입력기 (같은 이벤트 인터페이스)
+// 키보드: Space/Enter/↑ = 위 응시(선택), Backspace = 되돌리기, P = 쉬기
+// 터치(모바일): 짧게 탭 = 선택, 길게 누르기(0.6초+) = 되돌리기
 export class KeyboardTracker extends EventTarget {
   constructor() {
     super();
     this.running = false;
+    this.pointerDownAt = 0;
+
+    const interactive = (target) =>
+      target.closest?.('#settings, button, input, select, textarea, a') ||
+      ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A'].includes(target.tagName);
+
     this.handler = (e) => {
       if (!this.running) return;
       // 설정 패널의 슬라이더/입력을 조작할 때는 가로채지 않는다
-      if (e.target.closest?.('#settings') ||
-          ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.target.tagName)) {
-        return;
-      }
+      if (interactive(e.target)) return;
       if (e.key === 'ArrowUp' || e.key === ' ' || e.key === 'Enter') {
         e.preventDefault();
         this.dispatchEvent(new CustomEvent('answer', { detail: { dir: 'up' } }));
@@ -749,15 +758,34 @@ export class KeyboardTracker extends EventTarget {
         this.dispatchEvent(new CustomEvent('pausegesture'));
       }
     };
+
+    this.pointerDown = (e) => {
+      if (!this.running || interactive(e.target)) return;
+      this.pointerDownAt = performance.now();
+    };
+    this.pointerUp = (e) => {
+      if (!this.running || interactive(e.target) || this.pointerDownAt === 0) return;
+      const heldMs = performance.now() - this.pointerDownAt;
+      this.pointerDownAt = 0;
+      if (heldMs >= 600) {
+        this.dispatchEvent(new CustomEvent('retract', { detail: { dir: 'up' } }));
+      } else {
+        this.dispatchEvent(new CustomEvent('answer', { detail: { dir: 'up' } }));
+      }
+    };
   }
 
   start() {
     this.running = true;
     window.addEventListener('keydown', this.handler);
+    window.addEventListener('pointerdown', this.pointerDown);
+    window.addEventListener('pointerup', this.pointerUp);
   }
 
   stop() {
     this.running = false;
     window.removeEventListener('keydown', this.handler);
+    window.removeEventListener('pointerdown', this.pointerDown);
+    window.removeEventListener('pointerup', this.pointerUp);
   }
 }

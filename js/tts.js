@@ -25,6 +25,18 @@ export class KoreanTTS {
     return this.voice !== null;
   }
 
+  // iOS 사파리 등은 사용자 제스처 안에서 한 번 speak해야 이후 발화가 허용된다.
+  // 시작 버튼 클릭 시 호출해 잠금을 푼다.
+  unlock() {
+    if (!this.available || this.unlocked) return;
+    try {
+      const utter = new SpeechSynthesisUtterance(' ');
+      utter.volume = 0;
+      speechSynthesis.speak(utter);
+      this.unlocked = true;
+    } catch { /* 무시 */ }
+  }
+
   // 문장을 읽는다. 완료 시 resolve.
   speak(text) {
     if (!this.available) return Promise.resolve(false);

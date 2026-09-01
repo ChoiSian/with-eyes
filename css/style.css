@@ -32,6 +32,11 @@ body {
   font-family: 'Pretendard', 'Noto Sans KR', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
   font-size: 18px;
   overflow: hidden;
+  /* 모바일: 더블탭 확대/텍스트 선택으로 입력이 방해받지 않게 */
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button {
@@ -522,3 +527,56 @@ video#camera {
 }
 
 .toast.show { display: block; }
+
+/* ===== 모바일 (좁은 화면) ===== */
+@media (max-width: 760px) {
+  :root {
+    --sentence-size: clamp(24px, 4.6vh, 40px);
+    --tile-size: clamp(17px, 3.4vh, 30px);
+    --radius: 12px;
+  }
+
+  h1 { font-size: 32px; }
+  h2 { font-size: 24px; }
+  .sub { font-size: 16px; }
+  .checklist { font-size: 15px; padding: 12px 16px; line-height: 1.8; }
+  button { font-size: 17px; padding: 10px 16px; }
+  .screen { padding: 16px; gap: 14px; }
+
+  .sentence-bar { padding: 10px 12px; gap: 8px; }
+  .sentence-hint { display: none; }
+
+  .bands { padding: 8px 46px 8px 8px; gap: 8px; }
+  .band { gap: 7px; padding: 24px 8px 8px; border-width: 3px; }
+  .band.dense { gap: 5px; padding: 22px 6px 6px; }
+  .band.dense .tile { padding: 3px 7px; }
+  .band-cue { font-size: 12px; top: 5px; left: 8px; }
+  .band.scan-on .band-cue { font-size: 13px; }
+  .tile { padding: 6px 11px; border-radius: 9px; }
+
+  #gauge { width: 32px; right: 6px; top: 84px; bottom: 52px; }
+
+  .statusbar { font-size: 13px; gap: 8px; padding: 5px 8px; }
+  .statusbar .sub { display: none; }
+  #mini-cam { width: 60px; height: 34px; }
+
+  #echo .echo-text { font-size: clamp(36px, 9vh, 76px); padding: 16px 26px; border-radius: 16px; }
+
+  .overlay h2 { font-size: 30px; }
+  .overlay .sub { font-size: 17px; }
+  #overlay-pause .pattern { font-size: 24px; }
+
+  .practice-arrow { font-size: 76px; }
+  .practice-prompt { font-size: 34px; }
+
+  video#camera { width: min(92vw, 480px); }
+  .setup-grid { gap: 14px; }
+  .setup-status { font-size: 16px; line-height: 1.9; min-width: 0; width: min(92vw, 480px); }
+
+  .calib-dot { width: 58px; height: 58px; border-width: 4px; }
+  #calib-label { font-size: 24px; }
+
+  .settings-panel { padding: 16px 18px; }
+  .settings-row { font-size: 16px; flex-wrap: wrap; }
+  .settings-row input[type='range'] { width: 150px; }
+}
