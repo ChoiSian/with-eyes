@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>눈으로 — 시선 한국어 의사소통</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%91%81%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- 시작 화면 -->
+  <section id="screen-start" class="screen active">
+    <h1>👁 눈으로</h1>
+    <p class="sub">
+      눈동자를 <b>위/아래</b>로 움직이는 것만으로 한국어 문장을 만들고
+      음성으로 말하는 의사소통 앱입니다. 모든 처리는 이 기기 안에서만 이루어집니다.
+    </p>
+    <div class="checklist">
+      <div>✅ 카메라를 얼굴 정면, 눈높이, 40~60cm 거리에 두세요</div>
+      <div>✅ 얼굴 앞쪽에서 빛이 비치게 하세요 (역광 금지)</div>
+      <div>✅ 사용 중에는 다른 사람 얼굴이 화면에 들어오지 않게 하세요</div>
+      <div>✅ 화면 위쪽을 보면 <b>위 선택</b>, 아래쪽을 보면 <b>아래 선택</b></div>
+    </div>
+    <div id="tts-warn" class="warn-box">
+      ⚠️ 이 브라우저에 한국어 음성이 없습니다. 문장은 화면에 크게 표시되지만 소리로 읽어줄 수 없습니다.<br />
+      Windows: 설정 → 시간 및 언어 → 음성에서 한국어 음성 설치 ·
+      macOS: 시스템 설정 → 손쉬운 사용 → 콘텐츠 말하기에서 유나(Yuna) 설치
+    </div>
+    <div class="btn-row">
+      <button id="btn-start-camera" class="primary">카메라로 시작</button>
+      <button id="btn-start-keyboard">키보드 테스트 모드 (↑/↓)</button>
+    </div>
+  </section>
+
+  <!-- 카메라 설정 화면 -->
+  <section id="screen-setup" class="screen">
+    <h2>카메라 설정</h2>
+    <div class="setup-grid">
+      <video id="camera" autoplay playsinline muted></video>
+      <div class="setup-status">
+        <div id="st-face">얼굴 인식: <span class="bad">—</span></div>
+        <div id="st-distance">거리(눈 사이 픽셀): <span class="bad">—</span></div>
+        <div id="st-roll">기울기: <span class="bad">—</span></div>
+        <div id="st-light" class="sub" style="font-size:17px">
+          얼굴이 밝게, 화면 전체에 잘 보이면 준비 완료입니다.
+        </div>
+      </div>
+    </div>
+    <p class="sub" id="setup-msg">카메라를 켜는 중…</p>
+    <div class="btn-row">
+      <button id="btn-calib" class="primary" disabled>보정 시작 (약 40초)</button>
+      <button id="btn-skip-calib" style="display:none">저장된 보정으로 계속</button>
+    </div>
+  </section>
+
+  <!-- 보정 화면 -->
+  <section id="screen-calib" class="screen">
+    <div id="calib-label">잠시 후 파란 점을 눈으로 따라가세요</div>
+    <div id="calib-progress"></div>
+    <div class="calib-stage">
+      <div id="calib-dot" class="calib-dot" style="top:50%"></div>
+    </div>
+  </section>
+
+  <!-- 연습 화면 -->
+  <section id="screen-practice" class="screen">
+    <h2>연습</h2>
+    <p class="sub">화살표 방향을 봐 주세요. 응답이 잘 되는지 확인합니다.</p>
+    <div class="practice-arrow" id="practice-arrow">⬆️</div>
+    <div class="practice-prompt" id="practice-prompt">위를 보세요</div>
+    <div class="practice-result" id="practice-result"></div>
+  </section>
+
+  <!-- 메인 의사소통 화면 -->
+  <section id="screen-main" class="screen">
+    <div class="sentence-bar">
+      <div id="sentence"><span class="cursor"></span></div>
+      <div class="sentence-hint" id="mode-hint"></div>
+    </div>
+    <div class="bands">
+      <div id="band-top" class="band band-top">
+        <div class="fill"></div>
+        <div class="band-cue">⬆ 위를 보면 이쪽</div>
+      </div>
+      <div id="band-bottom" class="band band-bottom">
+        <div class="fill"></div>
+        <div class="band-cue">⬇ 아래를 보면 이쪽</div>
+      </div>
+    </div>
+    <div id="gauge">
+      <div class="zone-up"></div>
+      <div class="zone-down"></div>
+      <div class="needle"></div>
+    </div>
+    <div class="statusbar">
+      <span><span id="track-dot" class="dot"></span><span id="track-label">추적 준비</span></span>
+      <video id="mini-cam" autoplay playsinline muted></video>
+      <span id="fps-label"></span>
+      <span class="spacer"></span>
+      <span class="sub" style="font-size:15px">위 응시 = 위 밴드 · 아래 응시 = 아래 밴드 · 계속 응시하면 취소 · 두 눈 3초 감으면 쉬기</span>
+      <button id="btn-settings" class="gear-btn" title="보호자 설정">⚙️</button>
+    </div>
+  </section>
+
+  <!-- 선택 에코 -->
+  <div id="echo"><div class="echo-text"></div></div>
+
+  <!-- 일시정지 오버레이 -->
+  <div id="overlay-pause" class="overlay">
+    <h2>😌 쉬는 중</h2>
+    <p class="sub">다시 시작하려면 차례로:</p>
+    <div class="pattern" id="pause-pattern">⬆ 위 → ⬇ 아래 → ⬆ 위</div>
+    <button id="btn-resume">보호자: 바로 재개</button>
+  </div>
+
+  <!-- 얼굴 소실 오버레이 -->
+  <div id="overlay-facelost" class="overlay">
+    <h2>😶 얼굴을 찾을 수 없어요</h2>
+    <p class="sub">카메라에 얼굴이 잘 보이게 해 주세요. 입력은 잠시 멈췄습니다.</p>
+  </div>
+
+  <!-- 말하는 중 오버레이 -->
+  <div id="overlay-speaking" class="overlay">
+    <h2>🔊 말하는 중…</h2>
+    <p class="sub" id="speaking-text"></p>
+  </div>
+
+  <!-- 보호자 설정 -->
+  <div id="settings">
+    <div class="settings-panel">
+      <h2>보호자 설정</h2>
+      <div class="settings-row">
+        <span>응시 유지 시간 (밀리초)</span>
+        <span><input type="range" id="set-dwell" min="600" max="1500" step="100" />
+          <span id="set-dwell-val"></span></span>
+      </div>
+      <div class="settings-row">
+        <span>계속 응시로 취소 기능</span>
+        <input type="checkbox" id="set-retract" />
+      </div>
+      <div class="settings-row">
+        <span>말 속도</span>
+        <span><input type="range" id="set-rate" min="0.6" max="1.4" step="0.05" />
+          <span id="set-rate-val"></span></span>
+      </div>
+      <div class="settings-row">
+        <span>사용할 눈</span>
+        <select id="set-eye">
+          <option value="both">양쪽 눈</option>
+          <option value="left">왼쪽 눈만</option>
+          <option value="right">오른쪽 눈만</option>
+        </select>
+      </div>
+      <div class="settings-row">
+        <span>시선 다시 보정</span>
+        <button id="btn-recalib">보정 시작</button>
+      </div>
+      <div class="settings-row">
+        <span>학습된 단어 데이터</span>
+        <span>
+          <button id="btn-export">내보내기</button>
+          <button id="btn-import">가져오기</button>
+          <input type="file" id="import-file" accept=".json" style="display:none" />
+        </span>
+      </div>
+      <div class="settings-row">
+        <span>닫기</span>
+        <button id="btn-close-settings" class="primary">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

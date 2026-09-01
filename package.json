@@ -1,0 +1,11 @@
+{
+  "name": "with-eyes",
+  "version": "1.0.0",
+  "description": "눈동자 상하 움직임만으로 한국어 의사소통을 하는 AAC 웹앱",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "python3 -m http.server 8000 || python -m http.server 8000"
+  }
+}
