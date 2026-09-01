@@ -125,10 +125,14 @@ test('extractFeatures: 머리 기울기(roll)에 불변', () => {
 });
 
 test('DEFAULT_PARAMS: 안전 관련 상수 확인', () => {
-  // 벨 현상 방지: 깜빡임 직후 무시 시간과 디바운스는 안전-필수 값
+  // 벨 현상 방지: 깜빡임 직후 무시 시간은 안전-필수 값
   assert.ok(DEFAULT_PARAMS.postBlinkHoldMs >= 150);
-  assert.ok(DEFAULT_PARAMS.debounceMs >= 100);
-  assert.ok(DEFAULT_PARAMS.dwellMs >= 500);
+  // 이벤트 감지: 디바운스 + 확인 시간으로 단일 프레임 잡음을 걸러낸다
+  assert.ok(DEFAULT_PARAMS.debounceMs >= 50);
+  assert.ok(DEFAULT_PARAMS.confirmMs >= 80);
+  assert.ok(DEFAULT_PARAMS.debounceMs + DEFAULT_PARAMS.confirmMs >= 150);
+  // 기준선 추적은 이벤트(수백 ms)보다 훨씬 느려야 이벤트를 흡수하지 않는다
+  assert.ok(DEFAULT_PARAMS.baselineTauMs >= 800);
   // 민감도 기본값은 하한(잡음)과 상한(도달 가능성) 사이
-  assert.ok(DEFAULT_PARAMS.upSensitivity >= 0.3 && DEFAULT_PARAMS.upSensitivity <= 0.7);
+  assert.ok(DEFAULT_PARAMS.upSensitivity >= 0.25 && DEFAULT_PARAMS.upSensitivity <= 0.7);
 });

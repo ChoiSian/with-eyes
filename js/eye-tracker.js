@@ -28,29 +28,32 @@ const R_OUTER = 33, R_INNER = 133, R_IRIS = 468, R_LID_UP = 159, R_LID_DOWN = 14
 const L_INNER = 362, L_OUTER = 263, L_IRIS = 473, L_LID_UP = 386, L_LID_DOWN = 374;
 
 export const DEFAULT_PARAMS = {
-  dwellMs: 700, // 선택 확정까지 위 응시 유지 시간
-  debounceMs: 100, // 구역 진입 확인 시간
-  exitGraceMs: 150, // 구역 이탈 허용 시간 (이보다 길면 체류 취소)
-  lockoutMs: 600, // 응답 후 입력 잠금
-  neutralArmMs: 300, // 다음 응답 전 중립 유지 요구 시간
+  // '위로 움직이는 이벤트' 감지: 기준선 대비 상승(R)이 임계값을 넘어
+  // confirmMs 동안만 유지되면 즉시 선택. 긴 응시 유지가 필요 없다.
+  confirmMs: 150, // 잡음 구분용 최소 확인 시간 (선택까지 debounce+confirm ≈ 0.2초)
+  debounceMs: 60, // 구역 진입 확인 시간
+  exitGraceMs: 120, // 구역 이탈 허용 시간 (이보다 길면 확인 취소)
+  lockoutMs: 600, // 선택 후 입력 잠금
+  neutralArmMs: 300, // 다음 선택 전 기준선 근처 복귀 요구 시간
   retractEnabled: true,
   retractWarnMs: 1200, // 선택 확정 '후' 계속 응시 시 취소 경고 시점
   retractMs: 1800, // 선택 확정 후 이 시간까지 계속 응시하면 방금 선택 취소
   // 깜빡임 게이트 구간에는 깜빡임 직후 무시 시간(postBlinkHoldMs)도 포함되므로
   // 자연 깜빡임(100~400ms) + 150ms 를 감당할 수 있어야 한다
-  blinkPauseMaxMs: 450, // 이하의 게이트 구간은 체류 타이머만 일시정지
-  blinkAbortMs: 550, // 초과하면 체류 취소
+  blinkPauseMaxMs: 450, // 이하의 게이트 구간은 확인 타이머만 일시정지
+  blinkAbortMs: 550, // 초과하면 확인 취소
   postBlinkHoldMs: 150, // 깜빡임 직후 신호 무시 (벨 현상)
   pauseGestureMs: 3000, // 두 눈을 이 시간 이상 감으면 일시정지 제스처
   faceLossMs: 500,
   faceStableMs: 500,
   faceLossAlertMs: 10000,
-  emaTauMs: 80,
-  neutralBand: 1.5, // |S| < 1.5 = 중립 (보정 전 기본값)
-  // 위 응시 진입 임계값 = upSensitivity × 보정된 위 응시 크기(sUp).
+  emaTauMs: 40, // 빠른 경로 스무딩 (가볍게 — 이벤트 감지가 무뎌지지 않게)
+  baselineTauMs: 1200, // 기준선(느린 경로) 추적 시간 상수
+  baselineFreezeZ: 1.0, // 이보다 크게 올라가 있는 동안은 기준선 갱신 동결
+  neutralBand: 1.0, // R < 1.0 = 기준선 근처 (보정 전 기본값)
+  // 이벤트 임계값 = upSensitivity × 보정된 위 응시 크기(sUp).
   // 낮을수록 민감. 보호자 설정에서 실시간 조절 가능.
-  upSensitivity: 0.45,
-  driftBetaPerSec: 0.02, // 중립 기준선 적응 속도
+  upSensitivity: 0.35,
   eyeMode: 'both', // 'both' | 'left' | 'right'
 };
 
@@ -246,7 +249,10 @@ export class EyeTracker extends EventTarget {
     this.faceLost = false;
     this.faceLostAlerted = false;
     this.retractWarned = false;
-    this.driftNeutralSince = 0;
+    this.baseline = 0; // 느린 경로: 최근 시선 위치의 기준선
+    this.baselineInit = false;
+    this.riseHighSince = 0;
+    this.R = 0; // 기준선 대비 상승량 (결정 신호)
   }
 
   setParams(params) {
@@ -433,8 +439,8 @@ export class EyeTracker extends EventTarget {
     if (result.ok) {
       this.calib = result.calib;
       this.saveCalibration();
-      if (result.calib.weakSignal && this.params.dwellMs < 1000) {
-        this.params.dwellMs = 1000;
+      if (result.calib.weakSignal && this.params.confirmMs < 250) {
+        this.params.confirmMs = 250;
       }
     }
     return result;
@@ -545,7 +551,11 @@ export class EyeTracker extends EventTarget {
 
     const gatedNow = blinkNow || now < this.postBlinkUntil;
 
-    // 원시 융합 점수
+    // 이벤트 감지 신호:
+    // 빠른 경로(this.S) = 가볍게 스무딩한 현재 시선 위치
+    // 느린 경로(this.baseline) = 최근 1~2초의 기준선 (드리프트/자세 변화 흡수)
+    // R = S - baseline = "지금 눈동자가 기준선보다 얼마나 위로 움직였나"
+    // 절대 위치나 보정 오차와 무관하게 작은 상승도 즉시 잡힌다.
     if (!gatedNow) {
       const rawS = this.#fusedScore({ geo, geoLow });
       this.medianBuf.push(rawS);
@@ -555,22 +565,28 @@ export class EyeTracker extends EventTarget {
       const alpha = 1 - Math.exp(-dt / this.params.emaTauMs);
       this.S = this.S + alpha * (med - this.S);
 
-      // 중립 기준선 서서히 적응 (조명 변화/눈꺼풀 처짐 보상)
-      if (Math.abs(this.S) < this.#neutralBand()) {
-        if (this.driftNeutralSince === 0) this.driftNeutralSince = now;
-        if (now - this.driftNeutralSince > 2000) {
-          const beta = this.params.driftBetaPerSec * (dt / 1000);
-          for (const name of ['geo', 'geoLow']) {
-            const f = this.calib.features[name];
-            if (f?.weight) {
-              const x = name === 'geo' ? geo : geoLow;
-              if (Number.isFinite(x)) f.med += beta * (x - f.med);
-            }
+      if (!this.baselineInit) {
+        this.baseline = this.S;
+        this.baselineInit = true;
+      } else {
+        // 위로 움직이는 중(이벤트 진행)에는 기준선을 동결해
+        // 이벤트 자체가 기준선에 흡수되지 않게 한다
+        const rise = this.S - this.baseline;
+        if (this.state === 'idle' && rise < this.params.baselineFreezeZ) {
+          const beta = 1 - Math.exp(-dt / this.params.baselineTauMs);
+          this.baseline = this.baseline + beta * (this.S - this.baseline);
+          this.riseHighSince = 0;
+        } else if (this.state === 'idle') {
+          // 자세 변화 등으로 기준선보다 높은 상태가 오래 이어지면
+          // 아주 느리게 따라가 교착(입력 불능)을 방지한다
+          if (this.riseHighSince === 0) this.riseHighSince = now;
+          if (now - this.riseHighSince > 2500) {
+            const beta = 1 - Math.exp(-dt / 4000);
+            this.baseline = this.baseline + beta * (this.S - this.baseline);
           }
         }
-      } else {
-        this.driftNeutralSince = 0;
       }
+      this.R = this.S - this.baseline;
     }
     this.lastTs = now;
 
@@ -578,7 +594,7 @@ export class EyeTracker extends EventTarget {
 
     this.dispatchEvent(new CustomEvent('gaze', {
       detail: {
-        S: this.S,
+        S: this.R, // 게이지에는 기준선 대비 상승량을 표시
         zone: this.zone,
         state: this.state,
         progress: this.#dwellProgress(now),
@@ -629,30 +645,31 @@ export class EyeTracker extends EventTarget {
     if (this.state !== 'dwell') return 0;
     const elapsed = now - this.dwellStart - this.dwellPausedTotal -
       (this.dwellPausedAt ? now - this.dwellPausedAt : 0);
-    return clamp(elapsed / this.params.dwellMs, 0, 1);
+    return clamp(elapsed / this.params.confirmMs, 0, 1);
   }
 
-  // 임계값은 민감도 설정 × 보정된 위 응시 크기(sUp)에서 매번 계산한다.
+  // 이벤트 임계값(기준선 대비 상승량 기준)은 민감도 설정 × sUp 에서 매번 계산한다.
   // 슬라이더 조절이 재보정 없이 즉시 반영된다.
   #upEnter() {
     const s = this.calib.sUp;
-    // 하한 2σ: 중립 잡음만으로 시작되지 않게. 상한 0.8·sUp: 약한 신호도 도달 가능하게.
-    return Math.min(Math.max(this.params.upSensitivity * s, 2.0), 0.8 * s);
+    // 하한 1.5σ: 기준선 대비 측정이라 절대 위치보다 잡음이 작으므로 낮게 잡아도 안전.
+    // 상한 0.8·sUp: 약한 신호도 도달 가능하게.
+    return Math.min(Math.max(this.params.upSensitivity * s, 1.5), 0.8 * s);
   }
 
   #upExit() {
-    return 0.6 * this.#upEnter(); // 슈미트 트리거 (진입/이탈 분리)
+    return 0.5 * this.#upEnter(); // 슈미트 트리거 (진입/이탈 분리)
   }
 
-  // 중립 재장전 구역은 이탈 임계값보다 확실히 안쪽에
+  // 재장전 구역(기준선 근처)은 이탈 임계값보다 확실히 안쪽에
   #neutralBand() {
     if (!this.calib) return this.params.neutralBand;
-    return Math.min(1.5, 0.7 * this.#upExit());
+    return Math.min(1.0, 0.7 * this.#upExit());
   }
 
   #dwellMachine(now, gated) {
     const p = this.params;
-    const S = this.S;
+    const S = this.R; // 결정 신호 = 기준선 대비 상승량
 
     // 얼굴 소실 시 리셋은 #onFaceMissing에서 처리
     switch (this.state) {

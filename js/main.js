@@ -30,7 +30,7 @@ const state = {
   screen: 'screen-start',
   settingsOpen: false,
   settings: {
-    dwellMs: 700, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both',
+    confirmMs: 150, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both',
     scanPeriodMs: 1500,
     // 위 응시 진입 임계값 = upSensitivity × 보정된 위 응시 크기. 낮을수록 민감.
     upSensitivity: 0.45,
@@ -744,9 +744,9 @@ async function runCalibrationFlow() {
   }
 
   // 설정을 먼저 적용한 뒤 보정을 확정해야 약한 신호에 대한
-  // dwell 연장(finishCalibration 내부)이 설정에 덮어써지지 않는다
+  // 확인 시간 연장(finishCalibration 내부)이 설정에 덮어써지지 않는다
   state.tracker.setParams({
-    dwellMs: state.settings.dwellMs,
+    confirmMs: state.settings.confirmMs,
     retractEnabled: state.settings.retractEnabled,
     eyeMode: state.settings.eyeMode,
     upSensitivity: state.settings.upSensitivity,
@@ -758,12 +758,12 @@ async function runCalibrationFlow() {
     sounds.warn();
     return;
   }
-  if (result.calib.weakSignal && state.settings.dwellMs < 1000) {
-    // 트래커가 올린 dwell을 설정에도 반영해 이후 슬라이더 조작에 덮어써지지 않게 한다
-    state.settings.dwellMs = 1000;
+  if (result.calib.weakSignal && state.settings.confirmMs < 250) {
+    // 트래커가 올린 확인 시간을 설정에도 반영해 이후 슬라이더 조작에 덮어써지지 않게 한다
+    state.settings.confirmMs = 250;
     applySettingsToUI();
     saveSettings();
-    toast('신호가 약해 응시 시간을 1초로 늘렸습니다', 4000);
+    toast('신호가 약해 인식 확인 시간을 0.25초로 늘렸습니다', 4000);
   }
   await runPractice();
 }
@@ -862,7 +862,8 @@ function loadSettings() {
   // 손상된 저장값이 위험한 동작(예: dwell 0 = 모든 시선이 즉시 선택)을 만들지 않게 검증
   const s = state.settings;
   const num = (v, lo, hi, dflt) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt);
-  s.dwellMs = num(s.dwellMs, 500, 2000, 700);
+  s.confirmMs = num(s.confirmMs, 80, 800, 150);
+  delete s.dwellMs; // 구버전 설정 키 제거
   s.scanPeriodMs = num(s.scanPeriodMs, 600, 4000, 1500);
   s.ttsRate = num(s.ttsRate, 0.5, 1.6, 0.95);
   s.upSensitivity = num(s.upSensitivity, 0.3, 0.7, 0.45);
@@ -878,8 +879,8 @@ function saveSettings() {
 }
 
 function applySettingsToUI() {
-  $('#set-dwell').value = state.settings.dwellMs;
-  $('#set-dwell-val').textContent = state.settings.dwellMs + 'ms';
+  $('#set-dwell').value = state.settings.confirmMs;
+  $('#set-dwell-val').textContent = state.settings.confirmMs + 'ms';
   $('#set-scan').value = state.settings.scanPeriodMs;
   $('#set-scan-val').textContent = (state.settings.scanPeriodMs / 1000).toFixed(1) + '초';
   // 슬라이더는 오른쪽 = 민감 이 되도록 반전해 표시
@@ -895,7 +896,7 @@ function applySettings() {
   state.tts.rate = state.settings.ttsRate;
   if (state.tracker instanceof EyeTracker) {
     state.tracker.setParams({
-      dwellMs: state.settings.dwellMs,
+      confirmMs: state.settings.confirmMs,
       retractEnabled: state.settings.retractEnabled,
       eyeMode: state.settings.eyeMode,
       upSensitivity: state.settings.upSensitivity,
@@ -916,8 +917,8 @@ function wireSettingsUI() {
     restartScan();
   });
   $('#set-dwell').addEventListener('input', (e) => {
-    state.settings.dwellMs = Number(e.target.value);
-    $('#set-dwell-val').textContent = state.settings.dwellMs + 'ms';
+    state.settings.confirmMs = Number(e.target.value);
+    $('#set-dwell-val').textContent = state.settings.confirmMs + 'ms';
     applySettings();
   });
   $('#set-scan').addEventListener('input', (e) => {
