@@ -10,6 +10,7 @@
   --top-accent: #37b7ff;   /* 위 밴드 (파랑) */
   --bottom-accent: #ffb020; /* 아래 밴드 (주황) */
   --ok: #3ddc84;
+  --scan: #3ddc84; /* 하이라이트(선택 가능) 색 */
   --warn: #ff5d5d;
   --tile-bg: #232b3a;
   --tile-border: #35415a;
@@ -188,6 +189,8 @@ video#camera {
   background: var(--panel);
   padding: 14px 26px;
   min-height: calc(var(--sentence-size) * 1.5);
+  max-height: 24vh; /* 긴 문장이 밴드를 눌러 타일이 잘리는 것 방지 */
+  overflow-y: auto;
   display: flex;
   align-items: center;
   gap: 18px;
@@ -269,6 +272,16 @@ video#camera {
 .band.hot-top { box-shadow: 0 0 0 4px var(--top-accent) inset; }
 .band.hot-bottom { box-shadow: 0 0 0 4px var(--bottom-accent) inset; }
 
+/* 단일 스위치 스캐닝: 하이라이트가 켜진 밴드 */
+.band.scan-on {
+  border-color: var(--scan);
+  box-shadow: 0 0 0 3px var(--scan), 0 0 34px rgba(61, 220, 132, 0.35);
+}
+
+.band.scan-on .band-cue { color: var(--scan); font-size: 19px; }
+
+.band.scan-off { opacity: 0.45; }
+
 .band-cue {
   position: absolute;
   top: 8px;
@@ -337,6 +350,8 @@ video#camera {
 
 #mini-cam {
   width: 96px;
+  height: 54px; /* 스트림 없을 때 기본 150px로 상태바가 커지는 것 방지 */
+  object-fit: cover;
   border-radius: 8px;
   transform: scaleX(-1);
   background: #000;

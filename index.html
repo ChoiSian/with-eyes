@@ -12,14 +12,16 @@
   <section id="screen-start" class="screen active">
     <h1>👁 눈으로</h1>
     <p class="sub">
-      눈동자를 <b>위/아래</b>로 움직이는 것만으로 한국어 문장을 만들고
-      음성으로 말하는 의사소통 앱입니다. 모든 처리는 이 기기 안에서만 이루어집니다.
+      <b>눈을 위로 올렸다 내리는 동작 하나</b>만으로 한국어 문장을 만들고
+      음성으로 말하는 의사소통 앱입니다. 파란 불이 위/아래 칸을 번갈아 켜지고,
+      원하는 칸에 불이 켜졌을 때 위를 보면 선택됩니다.
+      모든 처리는 이 기기 안에서만 이루어집니다.
     </p>
     <div class="checklist">
       <div>✅ 카메라를 얼굴 정면, 눈높이, 40~60cm 거리에 두세요</div>
       <div>✅ 얼굴 앞쪽에서 빛이 비치게 하세요 (역광 금지)</div>
       <div>✅ 사용 중에는 다른 사람 얼굴이 화면에 들어오지 않게 하세요</div>
-      <div>✅ 화면 위쪽을 보면 <b>위 선택</b>, 아래쪽을 보면 <b>아래 선택</b></div>
+      <div>✅ 불이 켜진 칸에서 <b>위를 보면 선택</b> — 아래를 볼 필요가 없습니다</div>
     </div>
     <div id="tts-warn" class="warn-box">
       ⚠️ 이 브라우저에 한국어 음성이 없습니다. 문장은 화면에 크게 표시되지만 소리로 읽어줄 수 없습니다.<br />
@@ -28,7 +30,7 @@
     </div>
     <div class="btn-row">
       <button id="btn-start-camera" class="primary">카메라로 시작</button>
-      <button id="btn-start-keyboard">키보드 테스트 모드 (↑/↓)</button>
+      <button id="btn-start-keyboard">키보드 테스트 모드 (Space/↑)</button>
     </div>
   </section>
 
@@ -65,7 +67,7 @@
   <!-- 연습 화면 -->
   <section id="screen-practice" class="screen">
     <h2>연습</h2>
-    <p class="sub">화살표 방향을 봐 주세요. 응답이 잘 되는지 확인합니다.</p>
+    <p class="sub">"위를 보세요"가 나오면 위를 봤다가 다시 정면을 보세요.</p>
     <div class="practice-arrow" id="practice-arrow">⬆️</div>
     <div class="practice-prompt" id="practice-prompt">위를 보세요</div>
     <div class="practice-result" id="practice-result"></div>
@@ -80,16 +82,15 @@
     <div class="bands">
       <div id="band-top" class="band band-top">
         <div class="fill"></div>
-        <div class="band-cue">⬆ 위를 보면 이쪽</div>
+        <div class="band-cue">잠시 후 이 칸 차례</div>
       </div>
       <div id="band-bottom" class="band band-bottom">
         <div class="fill"></div>
-        <div class="band-cue">⬇ 아래를 보면 이쪽</div>
+        <div class="band-cue">잠시 후 이 칸 차례</div>
       </div>
     </div>
     <div id="gauge">
       <div class="zone-up"></div>
-      <div class="zone-down"></div>
       <div class="needle"></div>
     </div>
     <div class="statusbar">
@@ -97,7 +98,7 @@
       <video id="mini-cam" autoplay playsinline muted></video>
       <span id="fps-label"></span>
       <span class="spacer"></span>
-      <span class="sub" style="font-size:15px">위 응시 = 위 밴드 · 아래 응시 = 아래 밴드 · 계속 응시하면 취소 · 두 눈 3초 감으면 쉬기</span>
+      <span class="sub" style="font-size:15px">불 켜진 칸에서 위를 보면 선택 · 계속 응시하면 취소 · 두 눈 3초 감으면 쉬기</span>
       <button id="btn-settings" class="gear-btn" title="보호자 설정">⚙️</button>
     </div>
   </section>
@@ -108,8 +109,8 @@
   <!-- 일시정지 오버레이 -->
   <div id="overlay-pause" class="overlay">
     <h2>😌 쉬는 중</h2>
-    <p class="sub">다시 시작하려면 차례로:</p>
-    <div class="pattern" id="pause-pattern">⬆ 위 → ⬇ 아래 → ⬆ 위</div>
+    <p class="sub">다시 시작하려면 위를 3번 연속 보세요</p>
+    <div class="pattern" id="pause-pattern">⬆ 0 / 3</div>
     <button id="btn-resume">보호자: 바로 재개</button>
   </div>
 
@@ -131,8 +132,13 @@
       <h2>보호자 설정</h2>
       <div class="settings-row">
         <span>응시 유지 시간 (밀리초)</span>
-        <span><input type="range" id="set-dwell" min="600" max="1500" step="100" />
+        <span><input type="range" id="set-dwell" min="500" max="1500" step="100" />
           <span id="set-dwell-val"></span></span>
+      </div>
+      <div class="settings-row">
+        <span>칸 전환 속도 (하이라이트)</span>
+        <span><input type="range" id="set-scan" min="800" max="2500" step="100" />
+          <span id="set-scan-val"></span></span>
       </div>
       <div class="settings-row">
         <span>계속 응시로 취소 기능</span>

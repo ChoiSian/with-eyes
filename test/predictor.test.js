@@ -96,6 +96,41 @@ test('hasBatchim / particleForm', () => {
   assert.equal(particleForm(roParticle, '위'), '로'); // 받침 없음
 });
 
+test('조사와 동형어 단어가 충돌하지 않는다', () => {
+  const p = new Predictor([
+    { w: '이', f: 48, pos: 'n' }, // 치아
+    { w: '물', f: 95, pos: 'n' },
+  ], { persist: false });
+  const sugg = p.nextWords('물', 10);
+  const forms = sugg.filter((s) => s.word === '이');
+  // 조사 '이'(붙여쓰기)와 단어 '이'(띄어쓰기)가 별개 후보로 공존 가능
+  assert.ok(forms.some((s) => s.particle === true));
+});
+
+test('importData: 같은 백업 두 번 가져와도 수치가 불어나지 않는다', () => {
+  const p = newPredictor();
+  p.recordSentence('갈비탕 주세요');
+  const dump = p.exportData();
+  const p2 = newPredictor();
+  p2.importData(dump);
+  p2.importData(dump); // 재가져오기
+  const once = JSON.parse(p2.exportData());
+  assert.equal(once.lex['갈비탕'][0], 1);
+});
+
+test('importData: 손상된 값은 조용히 건너뛴다', () => {
+  const p = newPredictor();
+  p.importData(JSON.stringify({
+    lex: { '물': 5, '나쁨': ['a', 'b'], '좋음': [2, 1000] },
+    bigrams: { '아': 'x' },
+    __proto__: { hacked: true },
+  }));
+  // 유효한 항목만 반영, NaN 오염 없음
+  const sugg = p.completions('좋');
+  assert.ok(sugg.every((s) => Number.isFinite(s.score)));
+  assert.equal(Object.prototype.hacked, undefined);
+});
+
 test('export / import 왕복', () => {
   const p = newPredictor();
   p.recordSentence('갈비탕 먹고 싶어요');

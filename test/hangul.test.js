@@ -92,10 +92,31 @@ test('백스페이스: 확정된 글자로 되돌아가기', () => {
   assert.equal(c.value, 'ㄱ');
 });
 
-test('백스페이스: 겹모음은 요소 단위로', () => {
+test('백스페이스: 두 번에 조합한 겹모음은 요소 단위로', () => {
   const c = type(new HangulComposer(), ['ㄱ', 'ㅗ', 'ㅏ']);
   assert.equal(c.value, '과');
   c.backspace();
+  assert.equal(c.value, '고');
+});
+
+test('백스페이스: 한 번에 선택한 겹모음은 통째로 삭제', () => {
+  // UI에서 ㅘ를 하나의 항목으로 직접 선택한 경우: 선택 1회 = 백스페이스 1회
+  const c = type(new HangulComposer(), ['ㄱ', 'ㅘ']);
+  assert.equal(c.value, '과');
+  c.backspace();
+  assert.equal(c.value, 'ㄱ');
+  const c2 = type(new HangulComposer(), ['ㅢ']);
+  assert.equal(c2.value, 'ㅢ');
+  c2.backspace();
+  assert.equal(c2.value, '');
+});
+
+test('백스페이스: 확정 글자로 되돌아가면 자모 단위', () => {
+  // 확정된 '과'는 어떻게 입력했는지 알 수 없으므로 자모 단위로 지운다
+  const c = type(new HangulComposer(), ['ㄱ', 'ㅘ', ' ']);
+  assert.equal(c.value, '과 ');
+  c.backspace(); // 공백
+  c.backspace(); // ㅏ
   assert.equal(c.value, '고');
 });
 

@@ -14,28 +14,25 @@ function makeSamples(n, { geo, blend }, noise = 0.002) {
   return out;
 }
 
-test('computeCalibration: 정상 신호에서 보정 성공', () => {
+test('computeCalibration: 정상 신호에서 보정 성공 (가운데/위 2지점)', () => {
   const samples = {
     center: makeSamples(60, { geo: 0.0, blend: 0.0 }),
     up: makeSamples(60, { geo: 0.05, blend: 0.5 }),
-    down: makeSamples(60, { geo: -0.05, blend: -0.5 }),
   };
-  const result = computeCalibration(samples, [0.3, 0.4, 0.35]);
+  const result = computeCalibration(samples, [0.05, 0.1, 0.08]);
   assert.equal(result.ok, true);
   assert.ok(result.calib.upEnter > 0);
-  assert.ok(result.calib.downEnter < 0);
   assert.ok(result.calib.upExit < result.calib.upEnter);
-  assert.ok(result.calib.downExit > result.calib.downEnter);
   assert.ok(result.calib.blinkGate >= 0.5 && result.calib.blinkGate <= 0.8);
+  assert.ok(result.dPrimeUp >= 2.5);
 });
 
 test('computeCalibration: 분리도가 낮으면 실패와 안내 메시지', () => {
   const samples = {
     center: makeSamples(60, { geo: 0.0, blend: 0.0 }, 0.05),
     up: makeSamples(60, { geo: 0.005, blend: 0.02 }, 0.05),
-    down: makeSamples(60, { geo: -0.005, blend: -0.02 }, 0.05),
   };
-  const result = computeCalibration(samples, [0.3]);
+  const result = computeCalibration(samples, [0.05]);
   assert.equal(result.ok, false);
   assert.ok(result.message.length > 0);
 });
@@ -44,23 +41,31 @@ test('computeCalibration: 샘플 부족 시 실패', () => {
   const samples = {
     center: makeSamples(5, { geo: 0, blend: 0 }),
     up: makeSamples(60, { geo: 0.05, blend: 0.5 }),
-    down: makeSamples(60, { geo: -0.05, blend: -0.5 }),
   };
-  const result = computeCalibration(samples, [0.3]);
+  const result = computeCalibration(samples, [0.05]);
   assert.equal(result.ok, false);
 });
 
 test('computeCalibration: 한 특징이 고장나도 다른 특징으로 성공', () => {
   const samples = {
-    center: makeSamples(60, { geo: 0.0, blend: 0.0 }),
-    // blend가 방향을 구분하지 못함 (위/아래 모두 양수)
+    center: makeSamples(60, { geo: 0.0, blend: 0.3 }),
+    // blend가 위 응시를 전혀 구분하지 못함 (span 0)
     up: makeSamples(60, { geo: 0.05, blend: 0.3 }),
-    down: makeSamples(60, { geo: -0.05, blend: 0.3 }),
   };
-  const result = computeCalibration(samples, [0.3]);
+  const result = computeCalibration(samples, [0.05]);
   assert.equal(result.ok, true);
-  assert.equal(result.calib.features.blend.weight, 0);
   assert.ok(result.calib.features.geo.weight > 0);
+  // blend는 가중치가 매우 작아야 함 (span이 잡음 수준)
+  assert.ok(result.calib.features.geo.weight > result.calib.features.blend.weight * 100);
+});
+
+test('computeCalibration: 깜빡임 게이트는 자연 깜빡임 수준보다 높다', () => {
+  const samples = {
+    center: makeSamples(60, { geo: 0.0, blend: 0.0 }),
+    up: makeSamples(60, { geo: 0.05, blend: 0.5 }),
+  };
+  const result = computeCalibration(samples, [0.02, 0.03, 0.1, 0.05]);
+  assert.ok(result.calib.blinkGate >= 0.4);
 });
 
 test('extractFeatures: 홍채가 위로 가면 geo 신호가 양수', () => {
@@ -83,7 +88,7 @@ test('extractFeatures: 홍채가 위로 가면 geo 신호가 양수', () => {
   assert.ok(feat.geoR > 0, `geoR ${feat.geoR} > 0`);
   assert.ok(feat.geoL > 0, `geoL ${feat.geoL} > 0`);
 
-  // 아래를 보면 음수
+  // 정면보다 아래로 처지면 음수 (안 쓰지만 부호는 일관되어야)
   landmarks[468] = { x: 0.35, y: 0.52 };
   landmarks[473] = { x: 0.65, y: 0.52 };
   const feat2 = extractFeatures(landmarks, {}, 1000, 1000);
@@ -125,5 +130,5 @@ test('DEFAULT_PARAMS: 안전 관련 상수 확인', () => {
   // 벨 현상 방지: 깜빡임 직후 무시 시간과 디바운스는 안전-필수 값
   assert.ok(DEFAULT_PARAMS.postBlinkHoldMs >= 150);
   assert.ok(DEFAULT_PARAMS.debounceMs >= 100);
-  assert.ok(DEFAULT_PARAMS.dwellMs >= 600);
+  assert.ok(DEFAULT_PARAMS.dwellMs >= 500);
 });

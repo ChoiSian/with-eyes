@@ -1,13 +1,15 @@
-// MediaPipe FaceLandmarker 기반 상/하 시선 제스처 감지기.
+// MediaPipe FaceLandmarker 기반 '위 응시' 제스처 감지기.
+// 환자는 아래를 볼 수 없고, 눈을 위로 올렸다 내리는 동작만 가능하다고 가정한다.
+// 단일 스위치처럼 동작: 위를 일정 시간 응시하면 '선택' 이벤트 하나를 낸다.
 //
 // 신호 설계 (보정 기반):
 // - 1차 신호(기하): 홍채 중심에서 눈꼬리(내안각-외안각) 선까지의 부호 있는 수직거리
 //   / 눈꼬리 간 거리. 머리 기울기(roll)에 불변이고 거리에 불변.
 // - 2차 신호: FaceLandmarker 블렌드셰이프 (eyeLookUp/Down 평균 차).
-// - 보정에서 각 신호의 판별력(d')을 재서 가중 융합한 z-점수 S를 만든다.
-//   S ≈ 0 = 정면, S_up 근처 = 위, S_down 근처 = 아래.
+// - 보정(가운데/위 2지점)에서 각 신호의 판별력(d')을 재서 가중 융합한 z-점수 S를 만든다.
+//   S ≈ 0 = 정면, S_up 근처 = 위.
 // - 슈미트 트리거(진입/이탈 임계값 분리) + 체류(dwell) + 중립 복귀 재장전으로
-//   한 번의 시선 = 정확히 한 번의 응답을 보장한다.
+//   한 번의 위 응시 = 정확히 한 번의 선택을 보장한다.
 // - 깜빡임 동안 신호를 동결(freeze)하고, 깜빡임 직후 150ms도 무시한다
 //   (벨 현상: 눈 감을 때 안구가 위로 굴러 거짓 '위' 신호가 나옴).
 
@@ -24,16 +26,18 @@ const R_OUTER = 33, R_INNER = 133, R_IRIS = 468, R_LID_UP = 159, R_LID_DOWN = 14
 const L_INNER = 362, L_OUTER = 263, L_IRIS = 473, L_LID_UP = 386, L_LID_DOWN = 374;
 
 export const DEFAULT_PARAMS = {
-  dwellMs: 800, // 응답 확정까지 응시 유지 시간
+  dwellMs: 700, // 선택 확정까지 위 응시 유지 시간
   debounceMs: 100, // 구역 진입 확인 시간
   exitGraceMs: 150, // 구역 이탈 허용 시간 (이보다 길면 체류 취소)
   lockoutMs: 600, // 응답 후 입력 잠금
   neutralArmMs: 300, // 다음 응답 전 중립 유지 요구 시간
   retractEnabled: true,
-  retractWarnMs: 2000, // 계속 응시 시 취소 경고 시점 (체류 시작 기준)
-  retractMs: 2500, // 이 시점까지 계속 응시하면 방금 응답 취소
-  blinkPauseMaxMs: 300, // 이하의 깜빡임은 체류 타이머만 일시정지
-  blinkAbortMs: 400, // 초과하면 체류 취소
+  retractWarnMs: 1200, // 선택 확정 '후' 계속 응시 시 취소 경고 시점
+  retractMs: 1800, // 선택 확정 후 이 시간까지 계속 응시하면 방금 선택 취소
+  // 깜빡임 게이트 구간에는 깜빡임 직후 무시 시간(postBlinkHoldMs)도 포함되므로
+  // 자연 깜빡임(100~400ms) + 150ms 를 감당할 수 있어야 한다
+  blinkPauseMaxMs: 450, // 이하의 게이트 구간은 체류 타이머만 일시정지
+  blinkAbortMs: 550, // 초과하면 체류 취소
   postBlinkHoldMs: 150, // 깜빡임 직후 신호 무시 (벨 현상)
   pauseGestureMs: 3000, // 두 눈을 이 시간 이상 감으면 일시정지 제스처
   faceLossMs: 500,
@@ -113,16 +117,20 @@ export function extractFeatures(landmarks, blendMap, width, height) {
   return { geoR, geoL, earR, earL, blinkR, blinkL, blend, rollDeg, interocularPx };
 }
 
-// 보정 통계로부터 임계값을 계산한다. samples: {center|up|down: [{geo, blend}...]}
-export function computeCalibration(samples, blinkDownSamples) {
+// 보정 통계로부터 임계값을 계산한다. samples: {center|up: [{geo, blend}...]}
+// blinkNeutralSamples: 가운데 응시 중의 깜빡임 블렌드셰이프 값들 (게이트 산출용)
+export function computeCalibration(samples, blinkNeutralSamples) {
   const featureNames = ['geo', 'blend'];
   const stats = {};
   for (const name of featureNames) {
     stats[name] = {};
-    for (const target of ['center', 'up', 'down']) {
+    for (const target of ['center', 'up']) {
       const values = samples[target].map((s) => s[name]).filter((v) => Number.isFinite(v));
       if (values.length < 20) {
-        return { ok: false, message: `유효 샘플이 부족합니다 (${target}). 조명을 밝게 하고 다시 시도하세요.` };
+        return {
+          ok: false,
+          message: `유효 샘플이 부족합니다 (${target}). 조명을 밝게 하고, 보정 중에는 이 화면을 계속 켜 둔 채 다시 시도하세요.`,
+        };
       }
       const med = median(values);
       // 이상치 제거 후 재계산 (|x-med| > 3*1.4826*MAD)
@@ -142,25 +150,23 @@ export function computeCalibration(samples, blinkDownSamples) {
   for (const name of featureNames) {
     const st = stats[name];
     const spanUp = st.up.med - st.center.med;
-    const spanDown = st.down.med - st.center.med;
-    if (Math.sign(spanUp) === Math.sign(spanDown) || spanUp === 0 || spanDown === 0) {
-      features[name] = { weight: 0 }; // 방향을 구분하지 못하는 특징은 제외
+    if (spanUp === 0) {
+      features[name] = { weight: 0 }; // 위 응시를 구분하지 못하는 특징은 제외
       continue;
     }
     const sign = Math.sign(spanUp);
     const sigma = st.center.sigma;
     const dUp = Math.abs(spanUp) / sigma;
-    const dDown = Math.abs(spanDown) / sigma;
-    const weight = Math.min(dUp, dDown) ** 2;
-    features[name] = { weight, sign, med: st.center.med, sigma, dUp, dDown };
+    const weight = dUp ** 2;
+    features[name] = { weight, sign, med: st.center.med, sigma, dUp };
     wSum += weight;
   }
 
   if (wSum <= 0) {
-    return { ok: false, message: '위/아래 시선을 구분할 수 없습니다. 카메라를 눈높이에 맞추고 얼굴을 정면으로 비추세요.' };
+    return { ok: false, message: '위 응시를 구분할 수 없습니다. 카메라를 눈높이에 맞추고 얼굴을 정면으로 비추세요.' };
   }
 
-  // 융합 z-점수에서의 위/아래 평균 위치
+  // 융합 z-점수에서의 위 응시 평균 위치
   const fusedAt = (target) => {
     let acc = 0;
     for (const name of featureNames) {
@@ -171,34 +177,34 @@ export function computeCalibration(samples, blinkDownSamples) {
     return acc / wSum;
   };
   const sUp = fusedAt('up');
-  const sDown = fusedAt('down');
 
-  if (sUp < 2.5 || sDown > -2.5) {
+  if (sUp < 2.5) {
     return {
       ok: false,
       dPrimeUp: sUp,
-      dPrimeDown: -sDown,
       message:
-        '위/아래 구분이 약합니다 (조명을 밝게, 카메라를 40~60cm 눈높이로, 얼굴 정면에서). 다시 보정해 주세요.',
+        '위 응시 구분이 약합니다 (조명을 밝게, 카메라를 40~60cm 눈높이로, 얼굴 정면에서). 다시 보정해 주세요.',
     };
   }
 
+  // 진입 임계값: 기본은 max(0.55·sUp, 3σ)이지만, 신호가 약한 사용자도
+  // 자신의 보정된 위 응시(sUp)로 도달할 수 있도록 0.8·sUp를 넘지 않게 한다.
+  const upEnter = Math.min(Math.max(0.55 * sUp, 3.0), 0.8 * sUp);
+  const upExit = 0.65 * upEnter; // 슈미트 트리거 (진입/이탈 분리)
   const calib = {
     features,
     sUp,
-    sDown,
-    upEnter: Math.max(0.55 * sUp, 3.0),
-    upExit: Math.max(0.35 * sUp, 2.0),
-    downEnter: Math.min(0.55 * sDown, -3.0),
-    downExit: Math.min(0.35 * sDown, -2.0),
-    // 아래를 볼 때 눈꺼풀이 따라 내려와 blink 값이 커지므로, 환자 본인의
-    // 아래 응시 blink 최대치와 1.0의 중간을 깜빡임 게이트로 쓴다.
-    blinkGate: clamp((percentile(blinkDownSamples, 95) + 1) / 2, 0.5, 0.8),
+    upEnter,
+    upExit,
+    // 중립 재장전 구역은 이탈 임계값보다 확실히 안쪽에 둔다
+    neutralBand: Math.min(1.5, 0.7 * upExit),
+    // 자연 깜빡임 수준보다 확실히 높은 값을 깜빡임 게이트로 사용
+    blinkGate: clamp(percentile(blinkNeutralSamples, 80) + 0.3, 0.5, 0.8),
     neutralEar: median(samples.center.map((s) => s.ear).filter(Number.isFinite)),
-    weakSignal: Math.min(sUp, -sDown) < 3.0, // 약하면 dwell을 늘리도록 권고
+    weakSignal: sUp < 3.0, // 약하면 dwell을 늘리도록 권고
     createdAt: Date.now(),
   };
-  return { ok: true, dPrimeUp: sUp, dPrimeDown: -sDown, calib };
+  return { ok: true, dPrimeUp: sUp, calib };
 }
 
 export class EyeTracker extends EventTarget {
@@ -218,7 +224,7 @@ export class EyeTracker extends EventTarget {
     this.medianBuf = [];
     this.lastTs = 0;
     this.state = 'idle'; // idle | debounce | dwell | held | lockout
-    this.zone = 'neutral'; // up | down | neutral
+    this.zone = 'neutral'; // up | neutral
     this.stateSince = 0;
     this.dwellStart = 0;
     this.dwellPausedAt = 0;
@@ -245,10 +251,25 @@ export class EyeTracker extends EventTarget {
   loadStoredCalibration() {
     try {
       const raw = localStorage.getItem(CALIB_KEY);
-      if (raw) {
-        this.calib = JSON.parse(raw);
-        return true;
+      if (!raw) return false;
+      const calib = JSON.parse(raw);
+      // 손상되었거나 구버전 형식이면 버린다 (첫 프레임 TypeError 방지)
+      const valid =
+        calib && typeof calib === 'object' &&
+        Number.isFinite(calib.upEnter) && Number.isFinite(calib.upExit) &&
+        calib.upEnter > calib.upExit && calib.upExit > 0 &&
+        calib.features && typeof calib.features === 'object' &&
+        Object.values(calib.features).some(
+          (f) => f && f.weight > 0 &&
+            Number.isFinite(f.med) && Number.isFinite(f.sigma) && f.sigma > 0 &&
+            (f.sign === 1 || f.sign === -1),
+        );
+      if (!valid) {
+        localStorage.removeItem(CALIB_KEY);
+        return false;
       }
+      this.calib = calib;
+      return true;
     } catch { /* 무시 */ }
     return false;
   }
@@ -270,12 +291,18 @@ export class EyeTracker extends EventTarget {
 
     const { FaceLandmarker, FilesetResolver } = await import(BUNDLE_URL);
     const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
-    this.landmarker = await FaceLandmarker.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+    const options = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
       runningMode: 'VIDEO',
       numFaces: 1,
       outputFaceBlendshapes: true,
     });
+    try {
+      this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('GPU'));
+    } catch {
+      // 하드웨어 가속이 꺼진 환경(병원 관리 PC 등)에서는 CPU로 대체
+      this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('CPU'));
+    }
   }
 
   start() {
@@ -326,13 +353,13 @@ export class EyeTracker extends EventTarget {
   }
 
   static emptyCalibrationSamples() {
-    return { center: [], up: [], down: [], blinkDown: [] };
+    return { center: [], up: [], blinkCenter: [] };
   }
 
   finishCalibration(allSamples) {
     const result = computeCalibration(
-      { center: allSamples.center, up: allSamples.up, down: allSamples.down },
-      allSamples.blinkDown,
+      { center: allSamples.center, up: allSamples.up },
+      allSamples.blinkCenter,
     );
     if (result.ok) {
       this.calib = result.calib;
@@ -349,7 +376,12 @@ export class EyeTracker extends EventTarget {
     let result;
     try {
       result = this.landmarker.detectForVideo(this.video, now);
+      this.detectErrors = 0;
     } catch {
+      // 추론 실패(GPU 컨텍스트 소실 등)가 이어지면 얼굴 소실로 취급해
+      // 조용히 죽어 있는 대신 사용자에게 보이게 한다
+      this.detectErrors = (this.detectErrors ?? 0) + 1;
+      if (this.detectErrors > 15) this.#onFaceMissing(now);
       return;
     }
     const landmarks = result?.faceLandmarks?.[0];
@@ -359,6 +391,17 @@ export class EyeTracker extends EventTarget {
       return;
     }
     this.#onFacePresent(now);
+
+    // 프레임 공백(탭 숨김, 절전 등) 뒤에는 벽시계 시간이 점프해 있으므로
+    // 진행 중이던 체류를 그대로 완성시키지 않는다
+    if (this.lastTs && now - this.lastTs > 500) {
+      this.medianBuf = [];
+      if (this.state === 'debounce' || this.state === 'dwell' || this.state === 'held') {
+        this.#abortDwell('frame-gap');
+      }
+      this.armed = false;
+      this.neutralSince = 0;
+    }
 
     const blendMap = {};
     for (const c of result.faceBlendshapes?.[0]?.categories ?? []) {
@@ -433,7 +476,7 @@ export class EyeTracker extends EventTarget {
       this.S = this.S + alpha * (med - this.S);
 
       // 중립 기준선 서서히 적응 (조명 변화/눈꺼풀 처짐 보상)
-      if (Math.abs(this.S) < this.params.neutralBand) {
+      if (Math.abs(this.S) < this.#neutralBand()) {
         if (this.driftNeutralSince === 0) this.driftNeutralSince = now;
         if (now - this.driftNeutralSince > 2000) {
           const beta = this.params.driftBetaPerSec * (dt / 1000);
@@ -461,7 +504,6 @@ export class EyeTracker extends EventTarget {
         progress: this.#dwellProgress(now),
         gated: gatedNow,
         upEnter: this.calib.upEnter,
-        downEnter: this.calib.downEnter,
       },
     }));
   }
@@ -487,27 +529,20 @@ export class EyeTracker extends EventTarget {
       done.resolve({ target: done.target, samples: done.samples, blinkSamples: done.blinkSamples });
       return;
     }
-    // 아래 응시 타깃에서는 깜빡임 게이트로 버리지 않는다 (눈꺼풀이 원래 내려옴).
-    // 대신 blink 값을 기록해 게이트 보정에 쓴다.
-    if (col.target === 'down') {
-      col.blinkSamples.push(sample.blink);
-      if (Number.isFinite(sample.geo)) col.samples.push(sample);
-    } else if (!sample.blinkNow && Number.isFinite(sample.geo)) {
+    // 가운데 응시 중의 blink 값을 기록해 깜빡임 게이트 산출에 쓴다
+    if (col.target === 'center') col.blinkSamples.push(sample.blink);
+    if (!sample.blinkNow && Number.isFinite(sample.geo)) {
       col.samples.push(sample);
     }
   }
 
   #zoneOf(S) {
-    if (S >= this.calib.upEnter) return 'up';
-    if (S <= this.calib.downEnter) return 'down';
-    return 'neutral';
+    return S >= this.calib.upEnter ? 'up' : 'neutral';
   }
 
   #inZoneSustain(S, zone) {
     // 이탈 임계값 기준 (히스테리시스)
-    if (zone === 'up') return S >= this.calib.upExit;
-    if (zone === 'down') return S <= this.calib.downExit;
-    return false;
+    return zone === 'up' && S >= this.calib.upExit;
   }
 
   #dwellProgress(now) {
@@ -517,6 +552,11 @@ export class EyeTracker extends EventTarget {
     return clamp(elapsed / this.params.dwellMs, 0, 1);
   }
 
+  // 보정된 중립 구역 (보정 전이면 기본값)
+  #neutralBand() {
+    return this.calib?.neutralBand ?? this.params.neutralBand;
+  }
+
   #dwellMachine(now, gated) {
     const p = this.params;
     const S = this.S;
@@ -524,7 +564,7 @@ export class EyeTracker extends EventTarget {
     // 얼굴 소실 시 리셋은 #onFaceMissing에서 처리
     switch (this.state) {
       case 'idle': {
-        if (Math.abs(S) < p.neutralBand) {
+        if (Math.abs(S) < this.#neutralBand()) {
           if (this.neutralSince === 0) this.neutralSince = now;
           if (!this.armed && now - this.neutralSince >= p.neutralArmMs) this.armed = true;
         } else {
@@ -596,8 +636,9 @@ export class EyeTracker extends EventTarget {
       }
 
       case 'held': {
-        // 응답 후에도 같은 방향을 계속 응시하면 취소(retract)
-        const heldFor = now - this.dwellStart;
+        // 선택 확정 후에도 계속 응시하면 취소(retract).
+        // 확정 시점(stateSince)부터 재므로 dwell 길이/일시정지와 무관하게 일정하다.
+        const heldFor = now - this.stateSince;
         const stillIn = !gated && this.#inZoneSustain(S, this.zone);
         if (p.retractEnabled && stillIn) {
           if (!this.retractWarned && heldFor >= p.retractWarnMs) {
@@ -647,6 +688,15 @@ export class EyeTracker extends EventTarget {
     }
     this.faceStableSince = 0;
     if (this.faceLostSince === 0) this.faceLostSince = now;
+    // 짧은 추적 끊김 동안 체류 시간이 그대로 쌓이지 않도록
+    // 깜빡임과 같은 방식으로 일시정지/취소 처리한다
+    if (this.state === 'debounce') {
+      this.state = 'idle';
+      this.zone = 'neutral';
+    } else if (this.state === 'dwell') {
+      if (this.dwellPausedAt === 0) this.dwellPausedAt = now;
+      if (now - this.dwellPausedAt > this.params.blinkAbortMs) this.#abortDwell('face-gap');
+    }
     if (!this.faceLost && now - this.faceLostSince >= this.params.faceLossMs) {
       this.faceLost = true;
       this.faceLostAlerted = false;
@@ -677,18 +727,21 @@ export class EyeTracker extends EventTarget {
 }
 
 // 카메라 없이 키보드로 테스트하는 대체 입력기 (같은 이벤트 인터페이스)
+// Space/Enter/↑ = 위 응시(선택), Backspace = 되돌리기, P = 쉬기
 export class KeyboardTracker extends EventTarget {
   constructor() {
     super();
     this.running = false;
     this.handler = (e) => {
       if (!this.running) return;
-      if (e.key === 'ArrowUp') {
+      // 설정 패널의 슬라이더/입력을 조작할 때는 가로채지 않는다
+      if (e.target.closest?.('#settings') ||
+          ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.target.tagName)) {
+        return;
+      }
+      if (e.key === 'ArrowUp' || e.key === ' ' || e.key === 'Enter') {
         e.preventDefault();
         this.dispatchEvent(new CustomEvent('answer', { detail: { dir: 'up' } }));
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        this.dispatchEvent(new CustomEvent('answer', { detail: { dir: 'down' } }));
       } else if (e.key === 'Backspace') {
         e.preventDefault();
         this.dispatchEvent(new CustomEvent('retract', { detail: { dir: 'up' } }));

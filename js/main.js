@@ -29,7 +29,10 @@ const state = {
   undoStack: [],
   screen: 'screen-start',
   settingsOpen: false,
-  settings: { dwellMs: 800, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both' },
+  settings: { dwellMs: 700, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both', scanPeriodMs: 1500 },
+  // 단일 스위치 스캐닝: 하이라이트가 위/아래 밴드를 자동으로 오가고,
+  // 환자가 위를 보면 '지금 켜져 있는 밴드'가 선택된다.
+  scan: { highlight: 'top', lastFlip: 0, frozen: false, captured: null },
 };
 
 // ===== 소리 (이어콘) =====
@@ -71,6 +74,7 @@ function showScreen(id) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.remove('active'));
   $('#' + id).classList.add('active');
   state.screen = id;
+  if (typeof updateFaceLostOverlay === 'function') updateFaceLostOverlay();
 }
 
 function overlay(id, show) {
@@ -105,9 +109,21 @@ function wordContext() {
   return { currentWord, prevWord };
 }
 
-function snapshot() {
+function captureComposer() {
   const c = state.composer;
-  state.undoStack.push({ committed: c.committed, cho: c.cho, jung: c.jung, jong: c.jong });
+  return { committed: c.committed, cho: c.cho, jung: c.jung, jong: c.jong, jungAtomic: c.jungAtomic };
+}
+
+function composerChanged(snap) {
+  const c = state.composer;
+  return snap.committed !== c.committed || snap.cho !== c.cho ||
+    snap.jung !== c.jung || snap.jong !== c.jong;
+}
+
+// 문장을 실제로 바꾼 선택만 스냅샷으로 쌓는다.
+// 되돌리기(retract)는 항상 '마지막으로 문장이 바뀌기 직전' 상태로 복원된다.
+function pushSnapshot(snap) {
+  state.undoStack.push(snap);
   if (state.undoStack.length > 20) state.undoStack.shift();
 }
 
@@ -119,6 +135,7 @@ function restoreSnapshot() {
   c.cho = snap.cho;
   c.jung = snap.jung;
   c.jong = snap.jong;
+  c.jungAtomic = snap.jungAtomic ?? false;
   return true;
 }
 
@@ -258,6 +275,9 @@ function renderSentence() {
   const cursor = document.createElement('span');
   cursor.className = 'cursor';
   el.appendChild(cursor);
+  // 긴 문장은 스크롤로 항상 끝(커서)이 보이게
+  const bar = el.parentElement;
+  if (bar) bar.scrollTop = bar.scrollHeight;
 }
 
 const MODE_HINTS = {
@@ -292,7 +312,54 @@ function renderBands() {
 function render() {
   renderSentence();
   renderBands();
+  restartScan();
 }
+
+// ===== 단일 스위치 스캐닝 =====
+function scanRunning() {
+  return state.screen === 'screen-main' && !state.paused && !state.settingsOpen &&
+    !state.inputSuspended && !(state.faceLost && !state.usingKeyboard) && state.cycle;
+}
+
+// 빈 밴드는 하이라이트에서 건너뛴다
+function bandHasItems(name) {
+  return state.cycle && state.cycle.bands[name === 'top' ? 'top' : 'bottom'].length > 0;
+}
+
+function renderScanHighlight() {
+  const active = scanRunning();
+  for (const name of ['top', 'bottom']) {
+    const el = $('#band-' + name);
+    const on = active && state.scan.highlight === name;
+    el.classList.toggle('scan-on', on);
+    el.classList.toggle('scan-off', active && !on);
+    const cue = el.querySelector('.band-cue');
+    cue.textContent = on ? '👁 지금 위를 보면 이 칸 선택!' : '잠시 후 이 칸 차례';
+  }
+}
+
+function restartScan() {
+  state.scan.highlight = bandHasItems('top') ? 'top' : 'bottom';
+  state.scan.lastFlip = performance.now();
+  state.scan.frozen = false;
+  state.scan.captured = null;
+  renderScanHighlight();
+}
+
+function flipScan() {
+  const next = state.scan.highlight === 'top' ? 'bottom' : 'top';
+  if (bandHasItems(next)) {
+    state.scan.highlight = next;
+    tone(next === 'top' ? 520 : 390, 60, 0.03); // 구분되는 짧은 틱
+  }
+  state.scan.lastFlip = performance.now();
+  renderScanHighlight();
+}
+
+setInterval(() => {
+  if (!scanRunning() || state.scan.frozen) return;
+  if (performance.now() - state.scan.lastFlip >= state.settings.scanPeriodMs) flipScan();
+}, 50);
 
 // ===== 동작 =====
 function acceptSuggestion(item) {
@@ -309,7 +376,9 @@ function acceptSuggestion(item) {
 function deleteWord() {
   const c = state.composer;
   c.commitComposing();
-  c.committed = c.committed.replace(/\s*\S+\s*$/, '');
+  // 공백만 남은 경우도 비운다 (정규식이 비공백을 요구해 무시되는 일 방지)
+  if (c.committed.trim() === '') c.committed = '';
+  else c.committed = c.committed.replace(/\s*\S+\s*$/, '');
 }
 
 function cleanForSpeech(text) {
@@ -348,42 +417,45 @@ async function speakSentence() {
 function enterPause() {
   state.paused = true;
   state.pausePattern = [];
+  $('#pause-pattern').textContent = '⬆ 0 / 3';
   overlay('overlay-pause', true);
+  renderScanHighlight();
 }
 
 function resumeFromPause() {
   state.paused = false;
   overlay('overlay-pause', false);
   setMode('main');
+  updateFaceLostOverlay();
   toast('다시 시작합니다');
 }
 
-function handlePausePattern(dir) {
+// 쉬기 중 재개: 위 응시(선택 제스처)를 8초 안에 3번 연속
+function handlePausePattern() {
   const now = Date.now();
   if (now - state.pausePatternAt > 8000) state.pausePattern = [];
   state.pausePatternAt = now;
-  state.pausePattern.push(dir);
-  if (state.pausePattern.length > 3) state.pausePattern.shift();
-  if (state.pausePattern.join(',') === 'up,down,up') resumeFromPause();
+  state.pausePattern.push('up');
+  $('#pause-pattern').textContent =
+    `⬆ ${state.pausePattern.length} / 3`;
+  if (state.pausePattern.length >= 3) resumeFromPause();
 }
 
 function onSelect(item) {
   sounds.select();
   echo(item.label);
+  const before = captureComposer();
   switch (item.kind) {
     case 'jamo':
-      snapshot();
       state.composer.input(item.jamo);
       setMode('main');
       break;
     case 'suggestion':
-      snapshot();
       acceptSuggestion(item);
       setMode('main');
       break;
     case 'action':
       if (item.action === 'space') {
-        snapshot();
         state.composer.input(' ');
         setMode('main');
       } else if (item.action === 'delete') {
@@ -393,17 +465,15 @@ function onSelect(item) {
       } else if (item.action === 'quick') {
         setMode('quickcat');
       } else if (item.action === 'rest') {
-        enterPause();
         setMode('main');
+        enterPause();
       }
       break;
     case 'del':
       if (item.del === 'jamo') {
-        snapshot();
         state.composer.backspace();
         setMode('main');
       } else if (item.del === 'word') {
-        snapshot();
         deleteWord();
         setMode('main');
       } else if (item.del === 'all') {
@@ -418,60 +488,76 @@ function onSelect(item) {
       break;
     case 'quickphrase':
       if (item.text === null) setMode('quickcat');
-      else setMode('confirm-quick', item.text);
+      else setMode('confirm-quick', { text: item.text, catIdx: state.modeArg });
       break;
     case 'confirm':
       if (state.mode === 'confirm-quick') {
         if (item.yes) {
-          const text = state.modeArg;
+          const { text } = state.modeArg;
           setMode('main');
           speakText(text);
         } else {
-          setMode('quickcat');
+          // 문장 목록(카테고리 유지)으로 돌아간다
+          setMode('quickphrase', state.modeArg.catIdx);
         }
       } else if (state.mode === 'confirm-speak') {
         if (item.yes) speakSentence();
         else setMode('main');
       } else if (state.mode === 'confirm-clear') {
-        if (item.yes) {
-          snapshot();
-          state.composer.clear();
-        }
+        if (item.yes) state.composer.clear();
         setMode('main');
       } else if (state.mode === 'post-speak') {
-        if (item.yes) {
-          snapshot();
-          state.composer.clear();
-        }
+        if (item.yes) state.composer.clear();
         setMode('main');
       }
       break;
   }
+  // 문장이 실제로 바뀐 선택만 되돌리기 대상으로 기록
+  if (composerChanged(before)) pushSnapshot(before);
 }
 
 // ===== 입력 라우팅 =====
 let practiceResolver = null;
 
-function onAnswer(dir) {
+// 위 응시(선택 제스처) 한 가지만 입력으로 쓴다.
+// 선택되는 밴드는 '제스처를 시작한 순간' 하이라이트돼 있던 밴드.
+function onAnswer() {
   if (state.inputSuspended || state.settingsOpen) return;
   if (state.faceLost && !state.usingKeyboard) return;
 
   if (state.paused) {
-    handlePausePattern(dir);
+    handlePausePattern();
     return;
   }
 
   if (state.screen === 'screen-practice') {
-    if (practiceResolver) practiceResolver(dir);
+    if (practiceResolver) practiceResolver('up');
     return;
   }
 
   if (state.screen !== 'screen-main') return;
 
-  (dir === 'up' ? sounds.up : sounds.down)();
-  const res = state.cycle.answer(dir);
+  const band = state.scan.captured ?? state.scan.highlight;
+  state.scan.frozen = false;
+  state.scan.captured = null;
+  (band === 'top' ? sounds.up : sounds.down)();
+  const res = state.cycle.answer(band === 'top' ? 'up' : 'down');
   if (res.done) onSelect(res.item);
   else render();
+}
+
+// 시선을 올리기 시작하면 하이라이트 전환을 멈춰서
+// '내가 보던 칸'이 그대로 선택되도록 한다.
+function onDwellStart() {
+  if (!scanRunning()) return;
+  state.scan.frozen = true;
+  state.scan.captured = state.scan.highlight;
+}
+
+function onDwellAbort() {
+  state.scan.frozen = false;
+  state.scan.captured = null;
+  state.scan.lastFlip = performance.now(); // 남은 시간을 새로 줘서 급한 전환 방지
 }
 
 function onRetract() {
@@ -495,49 +581,54 @@ function onRetract() {
 function bindGazeVisuals(tracker) {
   const needle = $('#gauge .needle');
   const zoneUp = $('#gauge .zone-up');
-  const zoneDown = $('#gauge .zone-down');
   const fillTop = $('#band-top .fill');
   const fillBottom = $('#band-bottom .fill');
   const bandTop = $('#band-top');
   const bandBottom = $('#band-bottom');
 
   tracker.addEventListener('gaze', (e) => {
-    const { S, state: st, zone, progress, gated, upEnter, downEnter } = e.detail;
+    const { S, state: st, zone, progress, gated, upEnter } = e.detail;
+    // 게이지: 아래(-2σ)부터 위 임계값 너머까지
     const max = upEnter * 1.6;
-    const min = downEnter * 1.6;
+    const min = -2;
     const frac = 1 - (Math.min(max, Math.max(min, S)) - min) / (max - min);
     needle.style.top = `calc(${(frac * 100).toFixed(1)}% - 5px)`;
     needle.classList.toggle('gated', gated);
     zoneUp.style.top = '0';
     zoneUp.style.height = `${(((max - upEnter) / (max - min)) * 100).toFixed(1)}%`;
-    zoneDown.style.bottom = '0';
-    zoneDown.style.top = 'auto';
-    zoneDown.style.height = `${(((downEnter - min) / (max - min)) * 100).toFixed(1)}%`;
 
-    const inDwell = st === 'dwell';
-    fillTop.style.transform = `scaleY(${inDwell && zone === 'up' ? progress : 0})`;
-    fillBottom.style.transform = `scaleY(${inDwell && zone === 'down' ? progress : 0})`;
-    bandTop.classList.toggle('hot-top', zone === 'up' && (st === 'dwell' || st === 'debounce'));
-    bandBottom.classList.toggle('hot-bottom', zone === 'down' && (st === 'dwell' || st === 'debounce'));
+    // 체류 진행도는 '제스처 시작 시점에 켜져 있던' 밴드에 표시
+    const inDwell = st === 'dwell' && zone === 'up';
+    const band = state.scan.captured ?? state.scan.highlight;
+    fillTop.style.transform = `scaleY(${inDwell && band === 'top' ? progress : 0})`;
+    fillBottom.style.transform = `scaleY(${inDwell && band === 'bottom' ? progress : 0})`;
+    const engaged = st === 'dwell' || st === 'debounce';
+    bandTop.classList.toggle('hot-top', engaged && band === 'top');
+    bandBottom.classList.toggle('hot-bottom', engaged && band === 'bottom');
   });
 }
 
 // ===== 트래커 이벤트 배선 =====
 function wireTracker(tracker) {
-  tracker.addEventListener('answer', (e) => onAnswer(e.detail.dir));
+  tracker.addEventListener('answer', () => onAnswer());
+  tracker.addEventListener('dwellstart', () => onDwellStart());
+  tracker.addEventListener('dwellabort', () => onDwellAbort());
   tracker.addEventListener('retract', () => onRetract());
   tracker.addEventListener('retractwarn', () => {
     sounds.warn();
     toast('계속 응시하면 방금 선택이 취소됩니다', 1500);
   });
   tracker.addEventListener('pausegesture', () => {
-    if (!state.paused && state.screen === 'screen-main') enterPause();
+    if (!state.paused && !state.inputSuspended && !state.settingsOpen &&
+        state.screen === 'screen-main') {
+      enterPause();
+    }
   });
   tracker.addEventListener('facelost', () => {
     state.faceLost = true;
     $('#track-dot').classList.remove('ok');
     $('#track-label').textContent = '얼굴 소실';
-    if (state.screen === 'screen-main' && !state.paused) overlay('overlay-facelost', true);
+    updateFaceLostOverlay();
   });
   tracker.addEventListener('facelostlong', () => {
     sounds.warn();
@@ -546,8 +637,16 @@ function wireTracker(tracker) {
     state.faceLost = false;
     $('#track-dot').classList.add('ok');
     $('#track-label').textContent = '추적 중';
-    overlay('overlay-facelost', false);
+    updateFaceLostOverlay();
   });
+}
+
+// 얼굴 소실 오버레이는 상태가 바뀔 때마다 다시 평가한다
+// (다른 화면/쉬기 중에 소실돼도 메인으로 돌아오면 보이도록)
+function updateFaceLostOverlay() {
+  overlay('overlay-facelost',
+    state.faceLost && !state.usingKeyboard &&
+    state.screen === 'screen-main' && !state.paused);
 }
 
 // ===== 카메라 설정 화면 =====
@@ -599,14 +698,14 @@ function wireSetupStatus(tracker) {
 // ===== 보정 =====
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const CALIB_POSITIONS = { center: '50%', up: '12%', down: '88%' };
-const CALIB_LABELS = { center: '가운데 점을 바라보세요', up: '위쪽 점을 바라보세요', down: '아래쪽 점을 바라보세요' };
+const CALIB_POSITIONS = { center: '50%', up: '10%' };
+const CALIB_LABELS = { center: '가운데 점을 바라보세요', up: '위쪽 점을 바라보세요' };
 
 async function runCalibrationFlow() {
   showScreen('screen-calib');
   const dot = $('#calib-dot');
-  const all = { center: [], up: [], down: [], blinkDown: [] };
-  const order = ['center', 'up', 'down', 'center', 'up', 'down'];
+  const all = { center: [], up: [], blinkCenter: [] };
+  const order = ['center', 'up', 'center', 'up'];
 
   for (let i = 0; i < order.length; i++) {
     const target = order[i];
@@ -625,12 +724,19 @@ async function runCalibrationFlow() {
     if (collected) {
       const key = collected.target;
       all[key].push(...collected.samples);
-      if (key === 'down') all.blinkDown.push(...collected.blinkSamples);
+      if (key === 'center') all.blinkCenter.push(...collected.blinkSamples);
     } else {
       state.tracker.collecting = null;
     }
   }
 
+  // 설정을 먼저 적용한 뒤 보정을 확정해야 약한 신호에 대한
+  // dwell 연장(finishCalibration 내부)이 설정에 덮어써지지 않는다
+  state.tracker.setParams({
+    dwellMs: state.settings.dwellMs,
+    retractEnabled: state.settings.retractEnabled,
+    eyeMode: state.settings.eyeMode,
+  });
   const result = state.tracker.finishCalibration(all);
   if (!result.ok) {
     showScreen('screen-setup');
@@ -638,40 +744,67 @@ async function runCalibrationFlow() {
     sounds.warn();
     return;
   }
-  state.tracker.setParams(state.settings);
-  if (result.calib.weakSignal) {
+  if (result.calib.weakSignal && state.settings.dwellMs < 1000) {
+    // 트래커가 올린 dwell을 설정에도 반영해 이후 슬라이더 조작에 덮어써지지 않게 한다
+    state.settings.dwellMs = 1000;
+    applySettingsToUI();
+    saveSettings();
     toast('신호가 약해 응시 시간을 1초로 늘렸습니다', 4000);
   }
   await runPractice();
 }
 
 // ===== 연습 =====
+// 1) 위를 보라고 할 때 인식되는지 (민감도)
+// 2) 가만히 있으라고 할 때 오인식이 없는지 (특이도)
 async function runPractice() {
   showScreen('screen-practice');
-  const dirs = ['up', 'down', 'up', 'down', 'down', 'up'];
-  let correct = 0;
+  let hits = 0;
+  let falsePos = 0;
   $('#practice-result').textContent = '';
-  for (let i = 0; i < dirs.length; i++) {
-    const want = dirs[i];
-    $('#practice-arrow').textContent = want === 'up' ? '⬆️' : '⬇️';
-    $('#practice-prompt').textContent = want === 'up' ? '위를 보세요' : '아래를 보세요';
-    const got = await new Promise((resolve) => { practiceResolver = resolve; });
+
+  const waitAnswer = (timeoutMs) => Promise.race([
+    new Promise((resolve) => { practiceResolver = () => resolve(true); }),
+    sleep(timeoutMs).then(() => false),
+  ]);
+
+  for (let i = 0; i < 4; i++) {
+    $('#practice-arrow').textContent = '⬆️';
+    $('#practice-prompt').textContent = '지금 위를 보세요!';
+    const got = await waitAnswer(6000);
     practiceResolver = null;
-    if (got === want) {
-      correct++;
-      $('#practice-result').textContent = `잘했어요! (${correct}/${i + 1})`;
+    if (got) {
+      hits++;
+      $('#practice-result').textContent = `잘했어요! (${hits}/${i + 1})`;
     } else {
       sounds.warn();
-      $('#practice-result').textContent = `반대 방향이 인식됐어요 (${correct}/${i + 1})`;
+      $('#practice-result').textContent = `인식되지 않았어요 (${hits}/${i + 1})`;
+    }
+    await sleep(900);
+  }
+
+  for (let i = 0; i < 2; i++) {
+    $('#practice-arrow').textContent = '😌';
+    $('#practice-prompt').textContent = '이번에는 가만히 정면을 보세요';
+    const got = await waitAnswer(3500);
+    practiceResolver = null;
+    if (got) {
+      falsePos++;
+      sounds.warn();
+      $('#practice-result').textContent = '가만히 있는데 선택이 인식됐어요';
+    } else {
+      $('#practice-result').textContent = '좋아요, 오인식 없음';
     }
     await sleep(700);
   }
-  if (correct >= 4) {
-    $('#practice-result').textContent = `${dirs.length}개 중 ${correct}개 성공 — 시작합니다!`;
+
+  if (hits >= 3 && falsePos <= 1) {
+    $('#practice-result').textContent = `위 응시 ${hits}/4 성공 — 시작합니다!`;
     await sleep(1400);
     enterMain();
   } else {
-    $('#practice-result').textContent = `${dirs.length}개 중 ${correct}개 성공 — 보정을 다시 하는 게 좋겠어요.`;
+    $('#practice-result').textContent =
+      `위 응시 ${hits}/4, 오인식 ${falsePos}/2 — 보정을 다시 하는 게 좋겠어요.`;
     await sleep(2200);
     showScreen('screen-setup');
     $('#setup-msg').textContent = '인식률이 낮았습니다. 조명/카메라 위치를 조정하고 다시 보정해 주세요.';
@@ -681,7 +814,14 @@ async function runPractice() {
 function enterMain() {
   showScreen('screen-main');
   const cam = $('#camera');
-  if (cam.srcObject) $('#mini-cam').srcObject = cam.srcObject;
+  const mini = $('#mini-cam');
+  if (cam.srcObject) {
+    mini.srcObject = cam.srcObject;
+  } else {
+    // 키보드 모드: 빈 비디오/게이지가 자리만 차지하지 않게 숨긴다
+    mini.style.display = 'none';
+    $('#gauge').style.display = 'none';
+  }
   setMode('main');
 }
 
@@ -691,6 +831,14 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) Object.assign(state.settings, JSON.parse(raw));
   } catch { /* 무시 */ }
+  // 손상된 저장값이 위험한 동작(예: dwell 0 = 모든 시선이 즉시 선택)을 만들지 않게 검증
+  const s = state.settings;
+  const num = (v, lo, hi, dflt) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt);
+  s.dwellMs = num(s.dwellMs, 500, 2000, 700);
+  s.scanPeriodMs = num(s.scanPeriodMs, 600, 4000, 1500);
+  s.ttsRate = num(s.ttsRate, 0.5, 1.6, 0.95);
+  s.retractEnabled = s.retractEnabled !== false;
+  if (!['both', 'left', 'right'].includes(s.eyeMode)) s.eyeMode = 'both';
   applySettingsToUI();
 }
 
@@ -703,6 +851,8 @@ function saveSettings() {
 function applySettingsToUI() {
   $('#set-dwell').value = state.settings.dwellMs;
   $('#set-dwell-val').textContent = state.settings.dwellMs + 'ms';
+  $('#set-scan').value = state.settings.scanPeriodMs;
+  $('#set-scan-val').textContent = (state.settings.scanPeriodMs / 1000).toFixed(1) + '초';
   $('#set-retract').checked = state.settings.retractEnabled;
   $('#set-rate').value = state.settings.ttsRate;
   $('#set-rate-val').textContent = state.settings.ttsRate;
@@ -725,14 +875,21 @@ function wireSettingsUI() {
   $('#btn-settings').addEventListener('click', () => {
     state.settingsOpen = true;
     $('#settings').classList.add('show');
+    renderScanHighlight();
   });
   $('#btn-close-settings').addEventListener('click', () => {
     state.settingsOpen = false;
     $('#settings').classList.remove('show');
+    restartScan();
   });
   $('#set-dwell').addEventListener('input', (e) => {
     state.settings.dwellMs = Number(e.target.value);
     $('#set-dwell-val').textContent = state.settings.dwellMs + 'ms';
+    applySettings();
+  });
+  $('#set-scan').addEventListener('input', (e) => {
+    state.settings.scanPeriodMs = Number(e.target.value);
+    $('#set-scan-val').textContent = (state.settings.scanPeriodMs / 1000).toFixed(1) + '초';
     applySettings();
   });
   $('#set-retract').addEventListener('change', (e) => {
@@ -747,6 +904,13 @@ function wireSettingsUI() {
   $('#set-eye').addEventListener('change', (e) => {
     state.settings.eyeMode = e.target.value;
     applySettings();
+    // 눈 구성이 바뀌면 기하 신호의 기준선이 달라지므로 반드시 다시 보정해야 한다
+    if (state.tracker instanceof EyeTracker && state.tracker.calib) {
+      state.settingsOpen = false;
+      $('#settings').classList.remove('show');
+      toast('사용할 눈이 바뀌어 다시 보정합니다', 3000);
+      runCalibrationFlow();
+    }
   });
   $('#btn-recalib').addEventListener('click', () => {
     state.settingsOpen = false;
@@ -801,9 +965,14 @@ async function startWithCamera() {
   try {
     await tracker.init($('#camera'));
   } catch (err) {
-    $('#setup-msg').textContent =
-      '⚠️ 카메라 또는 모델을 불러올 수 없습니다: ' + (err?.message ?? err) +
-      ' — 카메라 권한을 허용했는지, 인터넷이 연결되어 있는지(최초 실행 시 모델 다운로드) 확인해 주세요.';
+    // 모델 로드 실패 시 카메라 스트림을 정리하고 재시도 경로를 남긴다
+    const video = $('#camera');
+    video.srcObject?.getTracks?.().forEach((t) => t.stop());
+    video.srcObject = null;
+    state.tracker = null;
+    showScreen('screen-start');
+    toast('⚠️ 시작 실패: ' + (err?.message ?? err) +
+      ' — 카메라 권한과 인터넷 연결(최초 1회 모델 다운로드)을 확인하고 다시 시도하세요.', 8000);
     sounds.warn();
     return;
   }
@@ -827,7 +996,7 @@ function startWithKeyboard() {
   $('#track-dot').classList.add('ok');
   $('#track-label').textContent = '키보드 모드';
   enterMain();
-  toast('↑/↓ = 선택, Backspace = 되돌리기, P = 쉬기', 5000);
+  toast('Space/↑ = 선택(위 응시), Backspace = 되돌리기, P = 쉬기', 5000);
 }
 
 function boot() {

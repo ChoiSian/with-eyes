@@ -90,6 +90,8 @@ export class HangulComposer {
     this.cho = null; // 초성 (자음)
     this.jung = null; // 중성 (모음)
     this.jong = null; // 종성 (자음)
+    // 겹모음을 한 번의 선택으로 입력했는지 (백스페이스가 통째로 지우도록)
+    this.jungAtomic = false;
   }
 
   get composing() {
@@ -110,6 +112,7 @@ export class HangulComposer {
     this.cho = null;
     this.jung = null;
     this.jong = null;
+    this.jungAtomic = false;
   }
 
   commitComposing() {
@@ -190,6 +193,7 @@ export class HangulComposer {
     if (this.jung === null) {
       // 초성만 있거나 아무것도 없는 상태
       this.jung = ch;
+      this.jungAtomic = VOWEL_SPLIT[ch] !== undefined; // 겹모음을 한 번에 선택
       return;
     }
 
@@ -208,11 +212,13 @@ export class HangulComposer {
         this.jong = split ? JONG_COMPOUNDS[this.jong + movedCho] : movedCho;
         this.commitComposing();
         this.jung = ch;
+        this.jungAtomic = VOWEL_SPLIT[ch] !== undefined;
         return;
       }
       this.commitComposing();
       this.cho = movedCho;
       this.jung = ch;
+      this.jungAtomic = VOWEL_SPLIT[ch] !== undefined;
       return;
     }
 
@@ -220,9 +226,11 @@ export class HangulComposer {
     const compound = VOWEL_COMPOUNDS[this.jung + ch];
     if (compound) {
       this.jung = compound;
+      this.jungAtomic = false; // 두 번에 나눠 조합했으므로 요소 단위로 지움
     } else {
       this.commitComposing();
       this.jung = ch;
+      this.jungAtomic = VOWEL_SPLIT[ch] !== undefined;
     }
   }
 
@@ -235,12 +243,11 @@ export class HangulComposer {
     }
     if (this.jung !== null) {
       const split = VOWEL_SPLIT[this.jung];
-      if (split) {
-        this.jung = split[0];
-      } else if (this.cho !== null) {
-        this.jung = null;
+      if (split && !this.jungAtomic) {
+        this.jung = split[0]; // 두 번에 조합한 겹모음은 요소 단위로
       } else {
-        this.jung = null; // 모음 단독 삭제
+        this.jung = null; // 한 번에 선택한 겹모음/단모음은 통째로
+        this.jungAtomic = false;
       }
       return true;
     }
@@ -257,10 +264,12 @@ export class HangulComposer {
         this.cho = parts.cho;
         this.jung = parts.jung;
         this.jong = parts.jong || null;
+        this.jungAtomic = false; // 확정 글자로 되돌아갈 때는 자모 단위로 지움
         return this.backspace();
       }
       if (isVowel(last)) {
         this.jung = last;
+        this.jungAtomic = false;
         return this.backspace();
       }
       if (isConsonant(last)) {
