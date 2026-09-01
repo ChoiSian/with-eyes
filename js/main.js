@@ -637,6 +637,9 @@ function wireTracker(tracker) {
   tracker.addEventListener('facelostlong', () => {
     sounds.warn();
   });
+  tracker.addEventListener('rotationlock', (e) => {
+    toast(`카메라 방향을 자동 보정했어요 (${e.detail.rotation}°)`, 3500);
+  });
   tracker.addEventListener('facefound', () => {
     state.faceLost = false;
     $('#track-dot').classList.add('ok');
@@ -679,8 +682,9 @@ function wireSetupStatus(tracker) {
         distEl.textContent = `${Math.round(d.interocularPx)}px ${okDist ? '✓' : '(더 가까이)'}`;
         distEl.className = okDist ? 'good' : 'bad';
         const rollEl = $('#st-roll span');
-        const okRoll = Math.abs(d.rollDeg) <= 20 || Math.abs(Math.abs(d.rollDeg) - 180) <= 20;
-        rollEl.textContent = `${Math.round(d.rollDeg)}° ${okRoll ? '✓' : '(카메라를 얼굴과 나란히)'}`;
+        const okRoll = Math.abs(d.rollDeg) <= 25 || Math.abs(Math.abs(d.rollDeg) - 180) <= 25;
+        const rotNote = d.rotation ? ` · 자동 회전 ${d.rotation}°` : '';
+        rollEl.textContent = `${Math.round(d.rollDeg)}°${rotNote} ${okRoll ? '✓' : '(가능하면 카메라를 얼굴과 나란히)'}`;
         rollEl.className = okRoll ? 'good' : 'bad';
         setupReady = okDist;
       } else {

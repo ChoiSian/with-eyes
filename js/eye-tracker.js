@@ -20,6 +20,7 @@ const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
 const CALIB_KEY = 'aac.calib.v1';
+const ROTATION_KEY = 'aac.rotation.v1';
 
 // 랜드마크 인덱스 (478 포인트 모델)
 const R_OUTER = 33, R_INNER = 133, R_IRIS = 468, R_LID_UP = 159, R_LID_DOWN = 145;
@@ -301,6 +302,10 @@ export class EyeTracker extends EventTarget {
       runningMode: 'VIDEO',
       numFaces: 1,
       outputFaceBlendshapes: true,
+      // 침대 옆 조명/각도 조건에서도 얼굴을 놓치지 않도록 기본값(0.5)보다 관대하게
+      minFaceDetectionConfidence: 0.3,
+      minFacePresenceConfidence: 0.3,
+      minTrackingConfidence: 0.3,
     });
     try {
       this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('GPU'));
@@ -308,6 +313,62 @@ export class EyeTracker extends EventTarget {
       // 하드웨어 가속이 꺼진 환경(병원 관리 PC 등)에서는 CPU로 대체
       this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('CPU'));
     }
+
+    // 얼굴이 화면에서 옆/거꾸로 보일 때를 위한 입력 회전 (아래 #frameSource 참고)
+    this.canvas = document.createElement('canvas');
+    this.canvasCtx = this.canvas.getContext('2d', { willReadFrequently: false });
+    this.rotation = this.#loadRotation();
+    this.rotationSearchIdx = Math.max(0, [0, 90, 270, 180].indexOf(this.rotation));
+    this.rotationTriedAt = 0;
+    this.lastSavedRotation = this.rotation;
+  }
+
+  #loadRotation() {
+    try {
+      const r = Number(localStorage.getItem(ROTATION_KEY));
+      if ([0, 90, 180, 270].includes(r)) return r;
+    } catch { /* 무시 */ }
+    return 0;
+  }
+
+  #saveRotation() {
+    try {
+      localStorage.setItem(ROTATION_KEY, String(this.rotation));
+    } catch { /* 무시 */ }
+  }
+
+  // 현재 회전 설정에 맞는 추론 입력을 돌려준다.
+  // 감지기는 대략 정자세 얼굴만 찾으므로, 카메라가 옆/거꾸로 거치된 경우
+  // 프레임을 회전시켜 넣어야 인식이 된다. 시선 신호(홍채-눈꼬리선 수직거리)는
+  // 프레임 회전에 불변이라 보정값은 그대로 유효하다.
+  #frameSource() {
+    const vw = this.video.videoWidth;
+    const vh = this.video.videoHeight;
+    if (this.rotation === 0 || vw === 0) {
+      return { src: this.video, w: vw, h: vh };
+    }
+    const [cw, ch] = this.rotation === 180 ? [vw, vh] : [vh, vw];
+    if (this.canvas.width !== cw || this.canvas.height !== ch) {
+      this.canvas.width = cw;
+      this.canvas.height = ch;
+    }
+    const ctx = this.canvasCtx;
+    ctx.save();
+    ctx.translate(cw / 2, ch / 2);
+    ctx.rotate((this.rotation * Math.PI) / 180);
+    ctx.drawImage(this.video, -vw / 2, -vh / 2);
+    ctx.restore();
+    return { src: this.canvas, w: cw, h: ch };
+  }
+
+  // 얼굴을 계속 못 찾으면 다른 회전을 순서대로 시도한다.
+  // 옆으로 거치(90/270)가 침대 환경에서 가장 흔하므로 먼저 시도.
+  #searchRotation(now) {
+    if (now - this.rotationTriedAt < 700) return;
+    this.rotationTriedAt = now;
+    const candidates = [0, 90, 270, 180];
+    this.rotationSearchIdx = (this.rotationSearchIdx + 1) % candidates.length;
+    this.rotation = candidates[this.rotationSearchIdx];
   }
 
   start() {
@@ -379,8 +440,9 @@ export class EyeTracker extends EventTarget {
   // ===== 프레임 처리 =====
   #processFrame(now) {
     let result;
+    const frame = this.#frameSource();
     try {
-      result = this.landmarker.detectForVideo(this.video, now);
+      result = this.landmarker.detectForVideo(frame.src, now);
       this.detectErrors = 0;
     } catch {
       // 추론 실패(GPU 컨텍스트 소실 등)가 이어지면 얼굴 소실로 취급해
@@ -412,7 +474,7 @@ export class EyeTracker extends EventTarget {
     for (const c of result.faceBlendshapes?.[0]?.categories ?? []) {
       blendMap[c.categoryName] = c.score;
     }
-    const feat = extractFeatures(landmarks, blendMap, this.video.videoWidth, this.video.videoHeight);
+    const feat = extractFeatures(landmarks, blendMap, frame.w, frame.h);
 
     // 눈 유효성 (모드 + 깜빡임 + EAR)
     const gate = this.calib?.blinkGate ?? 0.5;
@@ -442,6 +504,7 @@ export class EyeTracker extends EventTarget {
         rollDeg: feat.rollDeg,
         blink: blinkMax,
         validEyes: geoValues.length,
+        rotation: this.rotation,
       },
     }));
 
@@ -685,6 +748,11 @@ export class EyeTracker extends EventTarget {
   }
 
   #onFaceMissing(now) {
+    // 얼굴이 계속 안 잡히면 카메라가 옆/거꾸로 거치됐을 수 있으므로
+    // 입력 회전을 바꿔 가며 탐색한다
+    if (this.faceLostSince !== 0 && now - this.faceLostSince > 700) {
+      this.#searchRotation(now);
+    }
     // 보정 수집 중 얼굴이 안 잡혀도 시간이 다 되면 수집을 끝낸다
     if (this.collecting && now >= this.collecting.endAt) {
       const done = this.collecting;
@@ -719,6 +787,15 @@ export class EyeTracker extends EventTarget {
 
   #onFacePresent(now) {
     this.faceLostSince = 0;
+    // 회전 탐색 중이었다면 현재 회전으로 고정하고 기억한다
+    if (this.rotation !== this.lastSavedRotation) {
+      this.lastSavedRotation = this.rotation;
+      this.rotationSearchIdx = [0, 90, 270, 180].indexOf(this.rotation);
+      this.#saveRotation();
+      if (this.rotation !== 0) {
+        this.dispatchEvent(new CustomEvent('rotationlock', { detail: { rotation: this.rotation } }));
+      }
+    }
     if (this.faceLost) {
       if (this.faceStableSince === 0) this.faceStableSince = now;
       if (now - this.faceStableSince >= this.params.faceStableMs) {
