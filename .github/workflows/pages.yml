@@ -1,0 +1,30 @@
+# 정적 앱을 GitHub Pages로 배포한다 (gh-pages 브랜치 방식).
+# gh-pages 브랜치가 존재하면 GitHub가 Pages를 자동 활성화하며,
+# HTTPS라서 모바일 브라우저에서도 웹캠 사용이 가능하다.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - claude/eye-tracking-korean-communication-ffc7c8
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Mirror current tree to gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push origin HEAD:gh-pages --force

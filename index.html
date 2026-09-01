@@ -2,7 +2,9 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1117" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <title>눈으로 — 시선 한국어 의사소통</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%91%81%3C/text%3E%3C/svg%3E" />
   <link rel="stylesheet" href="css/style.css" />
@@ -30,7 +32,7 @@
     </div>
     <div class="btn-row">
       <button id="btn-start-camera" class="primary">카메라로 시작</button>
-      <button id="btn-start-keyboard">키보드 테스트 모드 (Space/↑)</button>
+      <button id="btn-start-keyboard">키보드·터치 테스트 모드</button>
     </div>
   </section>
 
@@ -131,14 +133,19 @@
     <div class="settings-panel">
       <h2>보호자 설정</h2>
       <div class="settings-row">
-        <span>응시 유지 시간 (밀리초)</span>
-        <span><input type="range" id="set-dwell" min="500" max="1500" step="100" />
+        <span>인식 확인 시간 (길수록 오인식 감소)</span>
+        <span><input type="range" id="set-dwell" min="100" max="500" step="50" />
           <span id="set-dwell-val"></span></span>
       </div>
       <div class="settings-row">
         <span>칸 전환 속도 (하이라이트)</span>
         <span><input type="range" id="set-scan" min="800" max="2500" step="100" />
           <span id="set-scan-val"></span></span>
+      </div>
+      <div class="settings-row">
+        <span>위 응시 민감도 (오른쪽 = 민감)</span>
+        <span><input type="range" id="set-sens" min="30" max="70" step="5" />
+          <span id="set-sens-val"></span></span>
       </div>
       <div class="settings-row">
         <span>계속 응시로 취소 기능</span>

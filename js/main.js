@@ -29,7 +29,12 @@ const state = {
   undoStack: [],
   screen: 'screen-start',
   settingsOpen: false,
-  settings: { dwellMs: 700, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both', scanPeriodMs: 1500 },
+  settings: {
+    confirmMs: 150, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both',
+    scanPeriodMs: 1500,
+    // 위 응시 진입 임계값 = upSensitivity × 보정된 위 응시 크기. 낮을수록 민감.
+    upSensitivity: 0.45,
+  },
   // 단일 스위치 스캐닝: 하이라이트가 위/아래 밴드를 자동으로 오가고,
   // 환자가 위를 보면 '지금 켜져 있는 밴드'가 선택된다.
   scan: { highlight: 'top', lastFlip: 0, frozen: false, captured: null },
@@ -44,11 +49,15 @@ function ensureAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     } catch { /* 소리 없이 진행 */ }
   }
+  // iOS: 사용자 제스처 시점에 오디오/음성합성 잠금 해제
+  audioCtx?.resume?.();
+  state.tts.unlock();
 }
 
 function tone(freq, ms = 120, gainVal = 0.06) {
   if (!audioCtx) return;
   try {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.frequency.value = freq;
@@ -633,6 +642,9 @@ function wireTracker(tracker) {
   tracker.addEventListener('facelostlong', () => {
     sounds.warn();
   });
+  tracker.addEventListener('rotationlock', (e) => {
+    toast(`카메라 방향을 자동 보정했어요 (${e.detail.rotation}°)`, 3500);
+  });
   tracker.addEventListener('facefound', () => {
     state.faceLost = false;
     $('#track-dot').classList.add('ok');
@@ -675,8 +687,9 @@ function wireSetupStatus(tracker) {
         distEl.textContent = `${Math.round(d.interocularPx)}px ${okDist ? '✓' : '(더 가까이)'}`;
         distEl.className = okDist ? 'good' : 'bad';
         const rollEl = $('#st-roll span');
-        const okRoll = Math.abs(d.rollDeg) <= 20 || Math.abs(Math.abs(d.rollDeg) - 180) <= 20;
-        rollEl.textContent = `${Math.round(d.rollDeg)}° ${okRoll ? '✓' : '(카메라를 얼굴과 나란히)'}`;
+        const okRoll = Math.abs(d.rollDeg) <= 45;
+        const rotNote = d.rotation ? ` · 자동 회전 ${d.rotation}°` : '';
+        rollEl.textContent = `${Math.round(d.rollDeg)}°${rotNote} ${okRoll ? '✓' : '(자동 보정 중…)'}`;
         rollEl.className = okRoll ? 'good' : 'bad';
         setupReady = okDist;
       } else {
@@ -731,11 +744,12 @@ async function runCalibrationFlow() {
   }
 
   // 설정을 먼저 적용한 뒤 보정을 확정해야 약한 신호에 대한
-  // dwell 연장(finishCalibration 내부)이 설정에 덮어써지지 않는다
+  // 확인 시간 연장(finishCalibration 내부)이 설정에 덮어써지지 않는다
   state.tracker.setParams({
-    dwellMs: state.settings.dwellMs,
+    confirmMs: state.settings.confirmMs,
     retractEnabled: state.settings.retractEnabled,
     eyeMode: state.settings.eyeMode,
+    upSensitivity: state.settings.upSensitivity,
   });
   const result = state.tracker.finishCalibration(all);
   if (!result.ok) {
@@ -744,12 +758,12 @@ async function runCalibrationFlow() {
     sounds.warn();
     return;
   }
-  if (result.calib.weakSignal && state.settings.dwellMs < 1000) {
-    // 트래커가 올린 dwell을 설정에도 반영해 이후 슬라이더 조작에 덮어써지지 않게 한다
-    state.settings.dwellMs = 1000;
+  if (result.calib.weakSignal && state.settings.confirmMs < 250) {
+    // 트래커가 올린 확인 시간을 설정에도 반영해 이후 슬라이더 조작에 덮어써지지 않게 한다
+    state.settings.confirmMs = 250;
     applySettingsToUI();
     saveSettings();
-    toast('신호가 약해 응시 시간을 1초로 늘렸습니다', 4000);
+    toast('신호가 약해 인식 확인 시간을 0.25초로 늘렸습니다', 4000);
   }
   await runPractice();
 }
@@ -811,8 +825,22 @@ async function runPractice() {
   }
 }
 
+// 사용 중 화면이 꺼지지 않게 (모바일/태블릿)
+let wakeLock = null;
+async function acquireWakeLock() {
+  try {
+    wakeLock = await navigator.wakeLock?.request('screen');
+  } catch { /* 지원 안 되면 무시 */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.screen === 'screen-main') {
+    acquireWakeLock();
+  }
+});
+
 function enterMain() {
   showScreen('screen-main');
+  acquireWakeLock();
   const cam = $('#camera');
   const mini = $('#mini-cam');
   if (cam.srcObject) {
@@ -834,9 +862,11 @@ function loadSettings() {
   // 손상된 저장값이 위험한 동작(예: dwell 0 = 모든 시선이 즉시 선택)을 만들지 않게 검증
   const s = state.settings;
   const num = (v, lo, hi, dflt) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt);
-  s.dwellMs = num(s.dwellMs, 500, 2000, 700);
+  s.confirmMs = num(s.confirmMs, 80, 800, 150);
+  delete s.dwellMs; // 구버전 설정 키 제거
   s.scanPeriodMs = num(s.scanPeriodMs, 600, 4000, 1500);
   s.ttsRate = num(s.ttsRate, 0.5, 1.6, 0.95);
+  s.upSensitivity = num(s.upSensitivity, 0.3, 0.7, 0.45);
   s.retractEnabled = s.retractEnabled !== false;
   if (!['both', 'left', 'right'].includes(s.eyeMode)) s.eyeMode = 'both';
   applySettingsToUI();
@@ -849,10 +879,13 @@ function saveSettings() {
 }
 
 function applySettingsToUI() {
-  $('#set-dwell').value = state.settings.dwellMs;
-  $('#set-dwell-val').textContent = state.settings.dwellMs + 'ms';
+  $('#set-dwell').value = state.settings.confirmMs;
+  $('#set-dwell-val').textContent = state.settings.confirmMs + 'ms';
   $('#set-scan').value = state.settings.scanPeriodMs;
   $('#set-scan-val').textContent = (state.settings.scanPeriodMs / 1000).toFixed(1) + '초';
+  // 슬라이더는 오른쪽 = 민감 이 되도록 반전해 표시
+  $('#set-sens').value = Math.round(100 - state.settings.upSensitivity * 100);
+  $('#set-sens-val').textContent = `${Math.round(100 - state.settings.upSensitivity * 100)}`;
   $('#set-retract').checked = state.settings.retractEnabled;
   $('#set-rate').value = state.settings.ttsRate;
   $('#set-rate-val').textContent = state.settings.ttsRate;
@@ -863,9 +896,10 @@ function applySettings() {
   state.tts.rate = state.settings.ttsRate;
   if (state.tracker instanceof EyeTracker) {
     state.tracker.setParams({
-      dwellMs: state.settings.dwellMs,
+      confirmMs: state.settings.confirmMs,
       retractEnabled: state.settings.retractEnabled,
       eyeMode: state.settings.eyeMode,
+      upSensitivity: state.settings.upSensitivity,
     });
   }
   saveSettings();
@@ -883,13 +917,19 @@ function wireSettingsUI() {
     restartScan();
   });
   $('#set-dwell').addEventListener('input', (e) => {
-    state.settings.dwellMs = Number(e.target.value);
-    $('#set-dwell-val').textContent = state.settings.dwellMs + 'ms';
+    state.settings.confirmMs = Number(e.target.value);
+    $('#set-dwell-val').textContent = state.settings.confirmMs + 'ms';
     applySettings();
   });
   $('#set-scan').addEventListener('input', (e) => {
     state.settings.scanPeriodMs = Number(e.target.value);
     $('#set-scan-val').textContent = (state.settings.scanPeriodMs / 1000).toFixed(1) + '초';
+    applySettings();
+  });
+  $('#set-sens').addEventListener('input', (e) => {
+    const v = Number(e.target.value); // 오른쪽 = 민감
+    state.settings.upSensitivity = (100 - v) / 100;
+    $('#set-sens-val').textContent = `${v}`;
     applySettings();
   });
   $('#set-retract').addEventListener('change', (e) => {
@@ -980,6 +1020,7 @@ async function startWithCamera() {
   wireSetupStatus(tracker);
   bindGazeVisuals(tracker);
   tracker.start();
+  acquireWakeLock();
   if (tracker.loadStoredCalibration()) {
     $('#btn-skip-calib').style.display = '';
   }
@@ -996,7 +1037,7 @@ function startWithKeyboard() {
   $('#track-dot').classList.add('ok');
   $('#track-label').textContent = '키보드 모드';
   enterMain();
-  toast('Space/↑ = 선택(위 응시), Backspace = 되돌리기, P = 쉬기', 5000);
+  toast('선택 = Space/↑ 또는 화면 탭 · 되돌리기 = Backspace 또는 길게 누르기 · 쉬기 = P', 6000);
 }
 
 function boot() {

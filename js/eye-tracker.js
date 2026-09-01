@@ -19,33 +19,41 @@ const BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
-const CALIB_KEY = 'aac.calib.v1';
+// v2: 결정 신호를 눈동자(홍채 중심) 기하만으로 재구성 — 이전 보정과 호환되지 않음
+const CALIB_KEY = 'aac.calib.v2';
+const ROTATION_KEY = 'aac.rotation.v1';
 
 // 랜드마크 인덱스 (478 포인트 모델)
 const R_OUTER = 33, R_INNER = 133, R_IRIS = 468, R_LID_UP = 159, R_LID_DOWN = 145;
 const L_INNER = 362, L_OUTER = 263, L_IRIS = 473, L_LID_UP = 386, L_LID_DOWN = 374;
 
 export const DEFAULT_PARAMS = {
-  dwellMs: 700, // 선택 확정까지 위 응시 유지 시간
-  debounceMs: 100, // 구역 진입 확인 시간
-  exitGraceMs: 150, // 구역 이탈 허용 시간 (이보다 길면 체류 취소)
-  lockoutMs: 600, // 응답 후 입력 잠금
-  neutralArmMs: 300, // 다음 응답 전 중립 유지 요구 시간
+  // '위로 움직이는 이벤트' 감지: 기준선 대비 상승(R)이 임계값을 넘어
+  // confirmMs 동안만 유지되면 즉시 선택. 긴 응시 유지가 필요 없다.
+  confirmMs: 150, // 잡음 구분용 최소 확인 시간 (선택까지 debounce+confirm ≈ 0.2초)
+  debounceMs: 60, // 구역 진입 확인 시간
+  exitGraceMs: 120, // 구역 이탈 허용 시간 (이보다 길면 확인 취소)
+  lockoutMs: 600, // 선택 후 입력 잠금
+  neutralArmMs: 300, // 다음 선택 전 기준선 근처 복귀 요구 시간
   retractEnabled: true,
   retractWarnMs: 1200, // 선택 확정 '후' 계속 응시 시 취소 경고 시점
   retractMs: 1800, // 선택 확정 후 이 시간까지 계속 응시하면 방금 선택 취소
   // 깜빡임 게이트 구간에는 깜빡임 직후 무시 시간(postBlinkHoldMs)도 포함되므로
   // 자연 깜빡임(100~400ms) + 150ms 를 감당할 수 있어야 한다
-  blinkPauseMaxMs: 450, // 이하의 게이트 구간은 체류 타이머만 일시정지
-  blinkAbortMs: 550, // 초과하면 체류 취소
+  blinkPauseMaxMs: 450, // 이하의 게이트 구간은 확인 타이머만 일시정지
+  blinkAbortMs: 550, // 초과하면 확인 취소
   postBlinkHoldMs: 150, // 깜빡임 직후 신호 무시 (벨 현상)
   pauseGestureMs: 3000, // 두 눈을 이 시간 이상 감으면 일시정지 제스처
   faceLossMs: 500,
   faceStableMs: 500,
   faceLossAlertMs: 10000,
-  emaTauMs: 80,
-  neutralBand: 1.5, // |S| < 1.5 = 중립
-  driftBetaPerSec: 0.02, // 중립 기준선 적응 속도
+  emaTauMs: 40, // 빠른 경로 스무딩 (가볍게 — 이벤트 감지가 무뎌지지 않게)
+  baselineTauMs: 1200, // 기준선(느린 경로) 추적 시간 상수
+  baselineFreezeZ: 1.0, // 이보다 크게 올라가 있는 동안은 기준선 갱신 동결
+  neutralBand: 1.0, // R < 1.0 = 기준선 근처 (보정 전 기본값)
+  // 이벤트 임계값 = upSensitivity × 보정된 위 응시 크기(sUp).
+  // 낮을수록 민감. 보호자 설정에서 실시간 조절 가능.
+  upSensitivity: 0.35,
   eyeMode: 'both', // 'both' | 'left' | 'right'
 };
 
@@ -69,22 +77,32 @@ function percentile(arr, p) {
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
+// 측정된 얼굴 기울기(도)를 보고, 잔여 기울기를 ±45° 안으로 만드는
+// 90° 단위 회전 보정량을 돌려준다. |기울기| ≤ 55°면 보정 불필요(0).
+// (감지기는 ±45° 안팎까지는 견디므로 히스테리시스를 두어 떨림을 막는다)
+export function rollRotationFix(rollDeg) {
+  const roll = ((rollDeg % 360) + 540) % 360 - 180; // [-180, 180)
+  if (Math.abs(roll) <= 55) return 0;
+  return -Math.round(roll / 90) * 90;
+}
+
 // 프레임별 원시 특징 계산. landmarks: 픽셀 좌표로 변환된 배열.
 export function extractFeatures(landmarks, blendMap, width, height) {
   const px = (i) => ({ x: landmarks[i].x * width, y: landmarks[i].y * height });
 
-  const eyeGeo = (outerIdx, innerIdx, irisIdx) => {
+  // 눈꼬리 기준선(내안각-외안각)에 대한 임의 점의 부호 있는 수직거리 / 눈 폭.
+  // 이미지 좌표에서 화면 위쪽 = y 감소이므로 부호를 뒤집어 '위 = 양수'가 되게 한다.
+  // 회전/거리 불변.
+  const perpOf = (outerIdx, innerIdx, pointIdx) => {
     const a = px(outerIdx);
     const b = px(innerIdx);
-    const p = px(irisIdx);
+    const p = px(pointIdx);
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const len = Math.hypot(dx, dy);
     if (len < 1e-6) return null;
-    // 부호 있는 수직거리 (이미지 좌표: 외적이 양수면 홍채가 선 아래쪽).
-    // 화면 위쪽 = y 감소이므로 부호를 뒤집어 '위를 보면 양수'가 되게 한다.
     const cross = dx * (p.y - a.y) - dy * (p.x - a.x);
-    return -cross / (len * len); // 눈 폭으로 정규화
+    return -cross / (len * len);
   };
 
   const earOf = (upIdx, downIdx, outerIdx, innerIdx) => {
@@ -97,16 +115,22 @@ export function extractFeatures(landmarks, blendMap, width, height) {
     return Math.hypot(up.x - down.x, up.y - down.y) / w;
   };
 
-  const geoR = eyeGeo(R_OUTER, R_INNER, R_IRIS);
-  const geoL = eyeGeo(L_INNER, L_OUTER, L_IRIS);
+  // 결정 신호는 눈동자(홍채 중심) 기하만 사용한다:
+  // geo    = 홍채 중심이 눈꼬리 기준선 위로 올라간 높이
+  // geoLow = 홍채 중심이 아래 눈꺼풀에서 떨어진 높이 (아래 눈꺼풀은 시선을
+  //          따라 움직이지 않아 안정적인 기준이 된다)
+  const geoR = perpOf(R_OUTER, R_INNER, R_IRIS);
+  const geoL = perpOf(L_INNER, L_OUTER, L_IRIS);
+  const lowLidR = perpOf(R_OUTER, R_INNER, R_LID_DOWN);
+  const lowLidL = perpOf(L_INNER, L_OUTER, L_LID_DOWN);
+  const geoLowR = geoR !== null && lowLidR !== null ? geoR - lowLidR : null;
+  const geoLowL = geoL !== null && lowLidL !== null ? geoL - lowLidL : null;
   const earR = earOf(R_LID_UP, R_LID_DOWN, R_OUTER, R_INNER);
   const earL = earOf(L_LID_UP, L_LID_DOWN, L_INNER, L_OUTER);
 
+  // 블렌드셰이프는 깜빡임 게이트에만 사용 (시선 판정에는 쓰지 않음)
   const blinkR = blendMap.eyeBlinkRight ?? 0;
   const blinkL = blendMap.eyeBlinkLeft ?? 0;
-  const blend =
-    ((blendMap.eyeLookUpLeft ?? 0) + (blendMap.eyeLookUpRight ?? 0)) / 2 -
-    ((blendMap.eyeLookDownLeft ?? 0) + (blendMap.eyeLookDownRight ?? 0)) / 2;
 
   // 얼굴 기울기(roll)와 눈 사이 거리 (설정 화면용)
   const rMid = { x: (px(R_OUTER).x + px(R_INNER).x) / 2, y: (px(R_OUTER).y + px(R_INNER).y) / 2 };
@@ -114,13 +138,14 @@ export function extractFeatures(landmarks, blendMap, width, height) {
   const rollDeg = (Math.atan2(lMid.y - rMid.y, lMid.x - rMid.x) * 180) / Math.PI;
   const interocularPx = Math.hypot(lMid.x - rMid.x, lMid.y - rMid.y);
 
-  return { geoR, geoL, earR, earL, blinkR, blinkL, blend, rollDeg, interocularPx };
+  return { geoR, geoL, geoLowR, geoLowL, earR, earL, blinkR, blinkL, rollDeg, interocularPx };
 }
 
-// 보정 통계로부터 임계값을 계산한다. samples: {center|up: [{geo, blend}...]}
+// 보정 통계를 계산한다. samples: {center|up: [{geo, geoLow, ear}...]}
 // blinkNeutralSamples: 가운데 응시 중의 깜빡임 블렌드셰이프 값들 (게이트 산출용)
+// 임계값 자체는 저장하지 않고 런타임에 민감도 설정 × sUp 으로 계산한다.
 export function computeCalibration(samples, blinkNeutralSamples) {
-  const featureNames = ['geo', 'blend'];
+  const featureNames = ['geo', 'geoLow'];
   const stats = {};
   for (const name of featureNames) {
     stats[name] = {};
@@ -178,7 +203,7 @@ export function computeCalibration(samples, blinkNeutralSamples) {
   };
   const sUp = fusedAt('up');
 
-  if (sUp < 2.5) {
+  if (sUp < 2.0) {
     return {
       ok: false,
       dPrimeUp: sUp,
@@ -187,17 +212,9 @@ export function computeCalibration(samples, blinkNeutralSamples) {
     };
   }
 
-  // 진입 임계값: 기본은 max(0.55·sUp, 3σ)이지만, 신호가 약한 사용자도
-  // 자신의 보정된 위 응시(sUp)로 도달할 수 있도록 0.8·sUp를 넘지 않게 한다.
-  const upEnter = Math.min(Math.max(0.55 * sUp, 3.0), 0.8 * sUp);
-  const upExit = 0.65 * upEnter; // 슈미트 트리거 (진입/이탈 분리)
   const calib = {
     features,
     sUp,
-    upEnter,
-    upExit,
-    // 중립 재장전 구역은 이탈 임계값보다 확실히 안쪽에 둔다
-    neutralBand: Math.min(1.5, 0.7 * upExit),
     // 자연 깜빡임 수준보다 확실히 높은 값을 깜빡임 게이트로 사용
     blinkGate: clamp(percentile(blinkNeutralSamples, 80) + 0.3, 0.5, 0.8),
     neutralEar: median(samples.center.map((s) => s.ear).filter(Number.isFinite)),
@@ -241,7 +258,10 @@ export class EyeTracker extends EventTarget {
     this.faceLost = false;
     this.faceLostAlerted = false;
     this.retractWarned = false;
-    this.driftNeutralSince = 0;
+    this.baseline = 0; // 느린 경로: 최근 시선 위치의 기준선
+    this.baselineInit = false;
+    this.riseHighSince = 0;
+    this.R = 0; // 기준선 대비 상승량 (결정 신호)
   }
 
   setParams(params) {
@@ -256,8 +276,7 @@ export class EyeTracker extends EventTarget {
       // 손상되었거나 구버전 형식이면 버린다 (첫 프레임 TypeError 방지)
       const valid =
         calib && typeof calib === 'object' &&
-        Number.isFinite(calib.upEnter) && Number.isFinite(calib.upExit) &&
-        calib.upEnter > calib.upExit && calib.upExit > 0 &&
+        Number.isFinite(calib.sUp) && calib.sUp > 0 &&
         calib.features && typeof calib.features === 'object' &&
         Object.values(calib.features).some(
           (f) => f && f.weight > 0 &&
@@ -283,7 +302,12 @@ export class EyeTracker extends EventTarget {
   async init(video) {
     this.video = video;
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      video: {
+        facingMode: 'user', // 모바일에서 후면 카메라가 잡히지 않도록 전면 지정
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 },
+      },
       audio: false,
     });
     video.srcObject = stream;
@@ -296,12 +320,104 @@ export class EyeTracker extends EventTarget {
       runningMode: 'VIDEO',
       numFaces: 1,
       outputFaceBlendshapes: true,
+      // 침대 옆 조명/각도 조건에서도 얼굴을 놓치지 않도록 기본값(0.5)보다 관대하게
+      minFaceDetectionConfidence: 0.3,
+      minFacePresenceConfidence: 0.3,
+      minTrackingConfidence: 0.3,
     });
     try {
       this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('GPU'));
     } catch {
       // 하드웨어 가속이 꺼진 환경(병원 관리 PC 등)에서는 CPU로 대체
       this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('CPU'));
+    }
+
+    // 얼굴이 화면에서 옆/거꾸로 보일 때를 위한 입력 회전 (아래 #frameSource 참고)
+    this.canvas = document.createElement('canvas');
+    this.canvasCtx = this.canvas.getContext('2d', { willReadFrequently: false });
+    this.rotation = this.#loadRotation();
+    this.rotationSearchIdx = Math.max(0, [0, 90, 270, 180].indexOf(this.rotation));
+    this.rotationTriedAt = 0;
+    this.lastSavedRotation = this.rotation;
+    this.rollHighSince = 0;
+    this.lastRotationChangeAt = 0;
+  }
+
+  #loadRotation() {
+    try {
+      const r = Number(localStorage.getItem(ROTATION_KEY));
+      if ([0, 90, 180, 270].includes(r)) return r;
+    } catch { /* 무시 */ }
+    return 0;
+  }
+
+  #saveRotation() {
+    try {
+      localStorage.setItem(ROTATION_KEY, String(this.rotation));
+    } catch { /* 무시 */ }
+  }
+
+  // 현재 회전 설정에 맞는 추론 입력을 돌려준다.
+  // 감지기는 대략 정자세 얼굴만 찾으므로, 카메라가 옆/거꾸로 거치된 경우
+  // 프레임을 회전시켜 넣어야 인식이 된다. 시선 신호(홍채-눈꼬리선 수직거리)는
+  // 프레임 회전에 불변이라 보정값은 그대로 유효하다.
+  #frameSource() {
+    const vw = this.video.videoWidth;
+    const vh = this.video.videoHeight;
+    if (this.rotation === 0 || vw === 0) {
+      return { src: this.video, w: vw, h: vh };
+    }
+    const [cw, ch] = this.rotation === 180 ? [vw, vh] : [vh, vw];
+    if (this.canvas.width !== cw || this.canvas.height !== ch) {
+      this.canvas.width = cw;
+      this.canvas.height = ch;
+    }
+    const ctx = this.canvasCtx;
+    ctx.save();
+    ctx.translate(cw / 2, ch / 2);
+    ctx.rotate((this.rotation * Math.PI) / 180);
+    ctx.drawImage(this.video, -vw / 2, -vh / 2);
+    ctx.restore();
+    return { src: this.canvas, w: cw, h: ch };
+  }
+
+  // 얼굴을 계속 못 찾으면 다른 회전을 순서대로 시도한다.
+  // 옆으로 거치(90/270)가 침대 환경에서 가장 흔하므로 먼저 시도.
+  #searchRotation(now) {
+    if (now - this.rotationTriedAt < 700) return;
+    this.rotationTriedAt = now;
+    const candidates = [0, 90, 270, 180];
+    this.rotationSearchIdx = (this.rotationSearchIdx + 1) % candidates.length;
+    this.rotation = candidates[this.rotationSearchIdx];
+  }
+
+  // 회전을 바꾸고 신호 상태를 리셋한다 (좌표 불연속이 거짓 선택을 만들지 않게).
+  #applyRotation(rot, now) {
+    this.rotation = rot;
+    this.lastRotationChangeAt = now;
+    this.medianBuf = [];
+    this.baselineInit = false;
+    this.armed = false;
+    this.neutralSince = 0;
+    if (this.state === 'debounce' || this.state === 'dwell' || this.state === 'held') {
+      this.#abortDwell('rotation');
+    }
+  }
+
+  // 얼굴은 잡히지만 기울어져 보이는 경우(어중간한 거치 각도),
+  // 감지가 불안정해지기 전에 선제적으로 90° 단위 회전을 조정해
+  // 잔여 기울기를 항상 ±45° 안으로 유지한다.
+  #maybeNormalizeRoll(now, rollDeg) {
+    if (this.collecting) return; // 보정 수집 중에는 좌표 점프를 만들지 않는다
+    const fix = rollRotationFix(rollDeg);
+    if (fix === 0) {
+      this.rollHighSince = 0;
+      return;
+    }
+    if (this.rollHighSince === 0) this.rollHighSince = now;
+    if (now - this.rollHighSince > 800 && now - (this.lastRotationChangeAt ?? 0) > 2000) {
+      this.rollHighSince = 0;
+      this.#applyRotation((((this.rotation + fix) % 360) + 360) % 360, now);
     }
   }
 
@@ -364,8 +480,8 @@ export class EyeTracker extends EventTarget {
     if (result.ok) {
       this.calib = result.calib;
       this.saveCalibration();
-      if (result.calib.weakSignal && this.params.dwellMs < 1000) {
-        this.params.dwellMs = 1000;
+      if (result.calib.weakSignal && this.params.confirmMs < 250) {
+        this.params.confirmMs = 250;
       }
     }
     return result;
@@ -374,8 +490,9 @@ export class EyeTracker extends EventTarget {
   // ===== 프레임 처리 =====
   #processFrame(now) {
     let result;
+    const frame = this.#frameSource();
     try {
-      result = this.landmarker.detectForVideo(this.video, now);
+      result = this.landmarker.detectForVideo(frame.src, now);
       this.detectErrors = 0;
     } catch {
       // 추론 실패(GPU 컨텍스트 소실 등)가 이어지면 얼굴 소실로 취급해
@@ -396,6 +513,7 @@ export class EyeTracker extends EventTarget {
     // 진행 중이던 체류를 그대로 완성시키지 않는다
     if (this.lastTs && now - this.lastTs > 500) {
       this.medianBuf = [];
+      this.baselineInit = false; // 공백 전 기준선은 신뢰할 수 없다
       if (this.state === 'debounce' || this.state === 'dwell' || this.state === 'held') {
         this.#abortDwell('frame-gap');
       }
@@ -407,7 +525,10 @@ export class EyeTracker extends EventTarget {
     for (const c of result.faceBlendshapes?.[0]?.categories ?? []) {
       blendMap[c.categoryName] = c.score;
     }
-    const feat = extractFeatures(landmarks, blendMap, this.video.videoWidth, this.video.videoHeight);
+    const feat = extractFeatures(landmarks, blendMap, frame.w, frame.h);
+
+    // 기울어진 거치 각도를 선제적으로 정규화 (기울기 무관 동작)
+    this.#maybeNormalizeRoll(now, feat.rollDeg);
 
     // 눈 유효성 (모드 + 깜빡임 + EAR)
     const gate = this.calib?.blinkGate ?? 0.5;
@@ -418,9 +539,18 @@ export class EyeTracker extends EventTarget {
       (earFloor === 0 || feat.earL > earFloor) && Number.isFinite(feat.geoL);
 
     const geoValues = [];
-    if (rValid) geoValues.push(feat.geoR);
-    if (lValid) geoValues.push(feat.geoL);
+    const geoLowValues = [];
+    if (rValid) {
+      geoValues.push(feat.geoR);
+      if (Number.isFinite(feat.geoLowR)) geoLowValues.push(feat.geoLowR);
+    }
+    if (lValid) {
+      geoValues.push(feat.geoL);
+      if (Number.isFinite(feat.geoLowL)) geoLowValues.push(feat.geoLowL);
+    }
     const geo = geoValues.length ? geoValues.reduce((a, b) => a + b, 0) / geoValues.length : NaN;
+    const geoLow = geoLowValues.length
+      ? geoLowValues.reduce((a, b) => a + b, 0) / geoLowValues.length : NaN;
     const ear = (feat.earR + feat.earL) / 2;
 
     const blinkMax = Math.max(
@@ -437,12 +567,13 @@ export class EyeTracker extends EventTarget {
         rollDeg: feat.rollDeg,
         blink: blinkMax,
         validEyes: geoValues.length,
+        rotation: this.rotation,
       },
     }));
 
     // 보정 샘플 수집 중이면 여기서 끝
     if (this.collecting) {
-      this.#collectFrame(now, { geo, blend: feat.blend, ear, blink: blinkMax, blinkNow });
+      this.#collectFrame(now, { geo, geoLow, ear, blink: blinkMax, blinkNow });
       return;
     }
 
@@ -465,9 +596,13 @@ export class EyeTracker extends EventTarget {
 
     const gatedNow = blinkNow || now < this.postBlinkUntil;
 
-    // 원시 융합 점수
+    // 이벤트 감지 신호:
+    // 빠른 경로(this.S) = 가볍게 스무딩한 현재 시선 위치
+    // 느린 경로(this.baseline) = 최근 1~2초의 기준선 (드리프트/자세 변화 흡수)
+    // R = S - baseline = "지금 눈동자가 기준선보다 얼마나 위로 움직였나"
+    // 절대 위치나 보정 오차와 무관하게 작은 상승도 즉시 잡힌다.
     if (!gatedNow) {
-      const rawS = this.#fusedScore({ geo, blend: feat.blend });
+      const rawS = this.#fusedScore({ geo, geoLow });
       this.medianBuf.push(rawS);
       if (this.medianBuf.length > 3) this.medianBuf.shift();
       const med = median(this.medianBuf);
@@ -475,22 +610,28 @@ export class EyeTracker extends EventTarget {
       const alpha = 1 - Math.exp(-dt / this.params.emaTauMs);
       this.S = this.S + alpha * (med - this.S);
 
-      // 중립 기준선 서서히 적응 (조명 변화/눈꺼풀 처짐 보상)
-      if (Math.abs(this.S) < this.#neutralBand()) {
-        if (this.driftNeutralSince === 0) this.driftNeutralSince = now;
-        if (now - this.driftNeutralSince > 2000) {
-          const beta = this.params.driftBetaPerSec * (dt / 1000);
-          for (const name of ['geo', 'blend']) {
-            const f = this.calib.features[name];
-            if (f?.weight) {
-              const x = name === 'geo' ? geo : feat.blend;
-              if (Number.isFinite(x)) f.med += beta * (x - f.med);
-            }
+      if (!this.baselineInit) {
+        this.baseline = this.S;
+        this.baselineInit = true;
+      } else {
+        // 위로 움직이는 중(이벤트 진행)에는 기준선을 동결해
+        // 이벤트 자체가 기준선에 흡수되지 않게 한다
+        const rise = this.S - this.baseline;
+        if (this.state === 'idle' && rise < this.params.baselineFreezeZ) {
+          const beta = 1 - Math.exp(-dt / this.params.baselineTauMs);
+          this.baseline = this.baseline + beta * (this.S - this.baseline);
+          this.riseHighSince = 0;
+        } else if (this.state === 'idle') {
+          // 자세 변화 등으로 기준선보다 높은 상태가 오래 이어지면
+          // 아주 느리게 따라가 교착(입력 불능)을 방지한다
+          if (this.riseHighSince === 0) this.riseHighSince = now;
+          if (now - this.riseHighSince > 2500) {
+            const beta = 1 - Math.exp(-dt / 4000);
+            this.baseline = this.baseline + beta * (this.S - this.baseline);
           }
         }
-      } else {
-        this.driftNeutralSince = 0;
       }
+      this.R = this.S - this.baseline;
     }
     this.lastTs = now;
 
@@ -498,20 +639,20 @@ export class EyeTracker extends EventTarget {
 
     this.dispatchEvent(new CustomEvent('gaze', {
       detail: {
-        S: this.S,
+        S: this.R, // 게이지에는 기준선 대비 상승량을 표시
         zone: this.zone,
         state: this.state,
         progress: this.#dwellProgress(now),
         gated: gatedNow,
-        upEnter: this.calib.upEnter,
+        upEnter: this.#upEnter(),
       },
     }));
   }
 
-  #fusedScore({ geo, blend }) {
+  #fusedScore({ geo, geoLow }) {
     let acc = 0;
     let wSum = 0;
-    for (const [name, x] of [['geo', geo], ['blend', blend]]) {
+    for (const [name, x] of [['geo', geo], ['geoLow', geoLow]]) {
       const f = this.calib.features[name];
       if (!f?.weight || !Number.isFinite(x)) continue;
       acc += f.weight * f.sign * ((x - f.med) / f.sigma);
@@ -537,29 +678,43 @@ export class EyeTracker extends EventTarget {
   }
 
   #zoneOf(S) {
-    return S >= this.calib.upEnter ? 'up' : 'neutral';
+    return S >= this.#upEnter() ? 'up' : 'neutral';
   }
 
   #inZoneSustain(S, zone) {
     // 이탈 임계값 기준 (히스테리시스)
-    return zone === 'up' && S >= this.calib.upExit;
+    return zone === 'up' && S >= this.#upExit();
   }
 
   #dwellProgress(now) {
     if (this.state !== 'dwell') return 0;
     const elapsed = now - this.dwellStart - this.dwellPausedTotal -
       (this.dwellPausedAt ? now - this.dwellPausedAt : 0);
-    return clamp(elapsed / this.params.dwellMs, 0, 1);
+    return clamp(elapsed / this.params.confirmMs, 0, 1);
   }
 
-  // 보정된 중립 구역 (보정 전이면 기본값)
+  // 이벤트 임계값(기준선 대비 상승량 기준)은 민감도 설정 × sUp 에서 매번 계산한다.
+  // 슬라이더 조절이 재보정 없이 즉시 반영된다.
+  #upEnter() {
+    const s = this.calib.sUp;
+    // 하한 1.5σ: 기준선 대비 측정이라 절대 위치보다 잡음이 작으므로 낮게 잡아도 안전.
+    // 상한 0.8·sUp: 약한 신호도 도달 가능하게.
+    return Math.min(Math.max(this.params.upSensitivity * s, 1.5), 0.8 * s);
+  }
+
+  #upExit() {
+    return 0.5 * this.#upEnter(); // 슈미트 트리거 (진입/이탈 분리)
+  }
+
+  // 재장전 구역(기준선 근처)은 이탈 임계값보다 확실히 안쪽에
   #neutralBand() {
-    return this.calib?.neutralBand ?? this.params.neutralBand;
+    if (!this.calib) return this.params.neutralBand;
+    return Math.min(1.0, 0.7 * this.#upExit());
   }
 
   #dwellMachine(now, gated) {
     const p = this.params;
-    const S = this.S;
+    const S = this.R; // 결정 신호 = 기준선 대비 상승량
 
     // 얼굴 소실 시 리셋은 #onFaceMissing에서 처리
     switch (this.state) {
@@ -680,6 +835,11 @@ export class EyeTracker extends EventTarget {
   }
 
   #onFaceMissing(now) {
+    // 얼굴이 계속 안 잡히면 카메라가 옆/거꾸로 거치됐을 수 있으므로
+    // 입력 회전을 바꿔 가며 탐색한다
+    if (this.faceLostSince !== 0 && now - this.faceLostSince > 700) {
+      this.#searchRotation(now);
+    }
     // 보정 수집 중 얼굴이 안 잡혀도 시간이 다 되면 수집을 끝낸다
     if (this.collecting && now >= this.collecting.endAt) {
       const done = this.collecting;
@@ -714,6 +874,15 @@ export class EyeTracker extends EventTarget {
 
   #onFacePresent(now) {
     this.faceLostSince = 0;
+    // 회전 탐색 중이었다면 현재 회전으로 고정하고 기억한다
+    if (this.rotation !== this.lastSavedRotation) {
+      this.lastSavedRotation = this.rotation;
+      this.rotationSearchIdx = [0, 90, 270, 180].indexOf(this.rotation);
+      this.#saveRotation();
+      if (this.rotation !== 0) {
+        this.dispatchEvent(new CustomEvent('rotationlock', { detail: { rotation: this.rotation } }));
+      }
+    }
     if (this.faceLost) {
       if (this.faceStableSince === 0) this.faceStableSince = now;
       if (now - this.faceStableSince >= this.params.faceStableMs) {
@@ -726,19 +895,23 @@ export class EyeTracker extends EventTarget {
   }
 }
 
-// 카메라 없이 키보드로 테스트하는 대체 입력기 (같은 이벤트 인터페이스)
-// Space/Enter/↑ = 위 응시(선택), Backspace = 되돌리기, P = 쉬기
+// 카메라 없이 테스트하는 대체 입력기 (같은 이벤트 인터페이스)
+// 키보드: Space/Enter/↑ = 위 응시(선택), Backspace = 되돌리기, P = 쉬기
+// 터치(모바일): 짧게 탭 = 선택, 길게 누르기(0.6초+) = 되돌리기
 export class KeyboardTracker extends EventTarget {
   constructor() {
     super();
     this.running = false;
+    this.pointerDownAt = 0;
+
+    const interactive = (target) =>
+      target.closest?.('#settings, button, input, select, textarea, a') ||
+      ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A'].includes(target.tagName);
+
     this.handler = (e) => {
       if (!this.running) return;
       // 설정 패널의 슬라이더/입력을 조작할 때는 가로채지 않는다
-      if (e.target.closest?.('#settings') ||
-          ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.target.tagName)) {
-        return;
-      }
+      if (interactive(e.target)) return;
       if (e.key === 'ArrowUp' || e.key === ' ' || e.key === 'Enter') {
         e.preventDefault();
         this.dispatchEvent(new CustomEvent('answer', { detail: { dir: 'up' } }));
@@ -749,15 +922,34 @@ export class KeyboardTracker extends EventTarget {
         this.dispatchEvent(new CustomEvent('pausegesture'));
       }
     };
+
+    this.pointerDown = (e) => {
+      if (!this.running || interactive(e.target)) return;
+      this.pointerDownAt = performance.now();
+    };
+    this.pointerUp = (e) => {
+      if (!this.running || interactive(e.target) || this.pointerDownAt === 0) return;
+      const heldMs = performance.now() - this.pointerDownAt;
+      this.pointerDownAt = 0;
+      if (heldMs >= 600) {
+        this.dispatchEvent(new CustomEvent('retract', { detail: { dir: 'up' } }));
+      } else {
+        this.dispatchEvent(new CustomEvent('answer', { detail: { dir: 'up' } }));
+      }
+    };
   }
 
   start() {
     this.running = true;
     window.addEventListener('keydown', this.handler);
+    window.addEventListener('pointerdown', this.pointerDown);
+    window.addEventListener('pointerup', this.pointerUp);
   }
 
   stop() {
     this.running = false;
     window.removeEventListener('keydown', this.handler);
+    window.removeEventListener('pointerdown', this.pointerDown);
+    window.removeEventListener('pointerup', this.pointerUp);
   }
 }
