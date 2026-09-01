@@ -77,6 +77,15 @@ function percentile(arr, p) {
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
+// 측정된 얼굴 기울기(도)를 보고, 잔여 기울기를 ±45° 안으로 만드는
+// 90° 단위 회전 보정량을 돌려준다. |기울기| ≤ 55°면 보정 불필요(0).
+// (감지기는 ±45° 안팎까지는 견디므로 히스테리시스를 두어 떨림을 막는다)
+export function rollRotationFix(rollDeg) {
+  const roll = ((rollDeg % 360) + 540) % 360 - 180; // [-180, 180)
+  if (Math.abs(roll) <= 55) return 0;
+  return -Math.round(roll / 90) * 90;
+}
+
 // 프레임별 원시 특징 계산. landmarks: 픽셀 좌표로 변환된 배열.
 export function extractFeatures(landmarks, blendMap, width, height) {
   const px = (i) => ({ x: landmarks[i].x * width, y: landmarks[i].y * height });
@@ -330,6 +339,8 @@ export class EyeTracker extends EventTarget {
     this.rotationSearchIdx = Math.max(0, [0, 90, 270, 180].indexOf(this.rotation));
     this.rotationTriedAt = 0;
     this.lastSavedRotation = this.rotation;
+    this.rollHighSince = 0;
+    this.lastRotationChangeAt = 0;
   }
 
   #loadRotation() {
@@ -378,6 +389,36 @@ export class EyeTracker extends EventTarget {
     const candidates = [0, 90, 270, 180];
     this.rotationSearchIdx = (this.rotationSearchIdx + 1) % candidates.length;
     this.rotation = candidates[this.rotationSearchIdx];
+  }
+
+  // 회전을 바꾸고 신호 상태를 리셋한다 (좌표 불연속이 거짓 선택을 만들지 않게).
+  #applyRotation(rot, now) {
+    this.rotation = rot;
+    this.lastRotationChangeAt = now;
+    this.medianBuf = [];
+    this.baselineInit = false;
+    this.armed = false;
+    this.neutralSince = 0;
+    if (this.state === 'debounce' || this.state === 'dwell' || this.state === 'held') {
+      this.#abortDwell('rotation');
+    }
+  }
+
+  // 얼굴은 잡히지만 기울어져 보이는 경우(어중간한 거치 각도),
+  // 감지가 불안정해지기 전에 선제적으로 90° 단위 회전을 조정해
+  // 잔여 기울기를 항상 ±45° 안으로 유지한다.
+  #maybeNormalizeRoll(now, rollDeg) {
+    if (this.collecting) return; // 보정 수집 중에는 좌표 점프를 만들지 않는다
+    const fix = rollRotationFix(rollDeg);
+    if (fix === 0) {
+      this.rollHighSince = 0;
+      return;
+    }
+    if (this.rollHighSince === 0) this.rollHighSince = now;
+    if (now - this.rollHighSince > 800 && now - (this.lastRotationChangeAt ?? 0) > 2000) {
+      this.rollHighSince = 0;
+      this.#applyRotation((((this.rotation + fix) % 360) + 360) % 360, now);
+    }
   }
 
   start() {
@@ -472,6 +513,7 @@ export class EyeTracker extends EventTarget {
     // 진행 중이던 체류를 그대로 완성시키지 않는다
     if (this.lastTs && now - this.lastTs > 500) {
       this.medianBuf = [];
+      this.baselineInit = false; // 공백 전 기준선은 신뢰할 수 없다
       if (this.state === 'debounce' || this.state === 'dwell' || this.state === 'held') {
         this.#abortDwell('frame-gap');
       }
@@ -484,6 +526,9 @@ export class EyeTracker extends EventTarget {
       blendMap[c.categoryName] = c.score;
     }
     const feat = extractFeatures(landmarks, blendMap, frame.w, frame.h);
+
+    // 기울어진 거치 각도를 선제적으로 정규화 (기울기 무관 동작)
+    this.#maybeNormalizeRoll(now, feat.rollDeg);
 
     // 눈 유효성 (모드 + 깜빡임 + EAR)
     const gate = this.calib?.blinkGate ?? 0.5;

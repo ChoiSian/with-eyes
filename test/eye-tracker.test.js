@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeCalibration, extractFeatures, DEFAULT_PARAMS } from '../js/eye-tracker.js';
+import { computeCalibration, extractFeatures, DEFAULT_PARAMS, rollRotationFix } from '../js/eye-tracker.js';
 
 // 가짜 보정 샘플 생성: 평균 mu, 잡음 폭 noise
 function makeSamples(n, { geo, geoLow }, noise = 0.002) {
@@ -122,6 +122,26 @@ test('extractFeatures: 머리 기울기(roll)에 불변', () => {
   assert.ok(Math.abs(flat.geoR - tilted.geoR) < 0.005, `geo roll 불변: ${flat.geoR} vs ${tilted.geoR}`);
   assert.ok(Math.abs(flat.geoLowR - tilted.geoLowR) < 0.005, 'geoLow roll 불변');
   assert.ok(Math.abs(tilted.rollDeg - 15) < 1.5);
+});
+
+test('rollRotationFix: 기울기를 90° 단위 회전으로 정규화', () => {
+  // ±55° 이내는 보정 불필요 (감지기가 견디는 범위 + 히스테리시스)
+  assert.equal(rollRotationFix(0), 0);
+  assert.equal(rollRotationFix(30), 0);
+  assert.equal(rollRotationFix(-45), 0);
+  assert.equal(rollRotationFix(55), 0);
+  // 초과하면 잔여 기울기가 ±45° 안이 되는 보정량
+  assert.equal(rollRotationFix(60), -90); // 잔여 -30°
+  assert.equal(rollRotationFix(-70), 90); // 잔여 +20°
+  assert.equal(rollRotationFix(100), -90);
+  assert.equal(rollRotationFix(170), -180);
+  assert.equal(rollRotationFix(-170), 180);
+  assert.equal(rollRotationFix(231), 90); // 231° ≡ -129° → +90 → 잔여 -39°
+  // 모든 각도에서 보정 후 잔여 기울기가 ±55° 이내인지 전수 확인
+  for (let r = -180; r < 180; r += 5) {
+    const fixed = ((r + rollRotationFix(r)) % 360 + 540) % 360 - 180;
+    assert.ok(Math.abs(fixed) <= 55, `roll ${r} -> 잔여 ${fixed}`);
+  }
 });
 
 test('DEFAULT_PARAMS: 안전 관련 상수 확인', () => {

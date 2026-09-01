@@ -687,9 +687,9 @@ function wireSetupStatus(tracker) {
         distEl.textContent = `${Math.round(d.interocularPx)}px ${okDist ? '✓' : '(더 가까이)'}`;
         distEl.className = okDist ? 'good' : 'bad';
         const rollEl = $('#st-roll span');
-        const okRoll = Math.abs(d.rollDeg) <= 25 || Math.abs(Math.abs(d.rollDeg) - 180) <= 25;
+        const okRoll = Math.abs(d.rollDeg) <= 45;
         const rotNote = d.rotation ? ` · 자동 회전 ${d.rotation}°` : '';
-        rollEl.textContent = `${Math.round(d.rollDeg)}°${rotNote} ${okRoll ? '✓' : '(가능하면 카메라를 얼굴과 나란히)'}`;
+        rollEl.textContent = `${Math.round(d.rollDeg)}°${rotNote} ${okRoll ? '✓' : '(자동 보정 중…)'}`;
         rollEl.className = okRoll ? 'good' : 'bad';
         setupReady = okDist;
       } else {
