@@ -29,7 +29,12 @@ const state = {
   undoStack: [],
   screen: 'screen-start',
   settingsOpen: false,
-  settings: { dwellMs: 700, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both', scanPeriodMs: 1500 },
+  settings: {
+    dwellMs: 700, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both',
+    scanPeriodMs: 1500,
+    // 위 응시 진입 임계값 = upSensitivity × 보정된 위 응시 크기. 낮을수록 민감.
+    upSensitivity: 0.45,
+  },
   // 단일 스위치 스캐닝: 하이라이트가 위/아래 밴드를 자동으로 오가고,
   // 환자가 위를 보면 '지금 켜져 있는 밴드'가 선택된다.
   scan: { highlight: 'top', lastFlip: 0, frozen: false, captured: null },
@@ -744,6 +749,7 @@ async function runCalibrationFlow() {
     dwellMs: state.settings.dwellMs,
     retractEnabled: state.settings.retractEnabled,
     eyeMode: state.settings.eyeMode,
+    upSensitivity: state.settings.upSensitivity,
   });
   const result = state.tracker.finishCalibration(all);
   if (!result.ok) {
@@ -859,6 +865,7 @@ function loadSettings() {
   s.dwellMs = num(s.dwellMs, 500, 2000, 700);
   s.scanPeriodMs = num(s.scanPeriodMs, 600, 4000, 1500);
   s.ttsRate = num(s.ttsRate, 0.5, 1.6, 0.95);
+  s.upSensitivity = num(s.upSensitivity, 0.3, 0.7, 0.45);
   s.retractEnabled = s.retractEnabled !== false;
   if (!['both', 'left', 'right'].includes(s.eyeMode)) s.eyeMode = 'both';
   applySettingsToUI();
@@ -875,6 +882,9 @@ function applySettingsToUI() {
   $('#set-dwell-val').textContent = state.settings.dwellMs + 'ms';
   $('#set-scan').value = state.settings.scanPeriodMs;
   $('#set-scan-val').textContent = (state.settings.scanPeriodMs / 1000).toFixed(1) + '초';
+  // 슬라이더는 오른쪽 = 민감 이 되도록 반전해 표시
+  $('#set-sens').value = Math.round(100 - state.settings.upSensitivity * 100);
+  $('#set-sens-val').textContent = `${Math.round(100 - state.settings.upSensitivity * 100)}`;
   $('#set-retract').checked = state.settings.retractEnabled;
   $('#set-rate').value = state.settings.ttsRate;
   $('#set-rate-val').textContent = state.settings.ttsRate;
@@ -888,6 +898,7 @@ function applySettings() {
       dwellMs: state.settings.dwellMs,
       retractEnabled: state.settings.retractEnabled,
       eyeMode: state.settings.eyeMode,
+      upSensitivity: state.settings.upSensitivity,
     });
   }
   saveSettings();
@@ -912,6 +923,12 @@ function wireSettingsUI() {
   $('#set-scan').addEventListener('input', (e) => {
     state.settings.scanPeriodMs = Number(e.target.value);
     $('#set-scan-val').textContent = (state.settings.scanPeriodMs / 1000).toFixed(1) + '초';
+    applySettings();
+  });
+  $('#set-sens').addEventListener('input', (e) => {
+    const v = Number(e.target.value); // 오른쪽 = 민감
+    state.settings.upSensitivity = (100 - v) / 100;
+    $('#set-sens-val').textContent = `${v}`;
     applySettings();
   });
   $('#set-retract').addEventListener('change', (e) => {

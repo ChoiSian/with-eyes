@@ -19,7 +19,8 @@ const BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
-const CALIB_KEY = 'aac.calib.v1';
+// v2: 결정 신호를 눈동자(홍채 중심) 기하만으로 재구성 — 이전 보정과 호환되지 않음
+const CALIB_KEY = 'aac.calib.v2';
 const ROTATION_KEY = 'aac.rotation.v1';
 
 // 랜드마크 인덱스 (478 포인트 모델)
@@ -45,7 +46,10 @@ export const DEFAULT_PARAMS = {
   faceStableMs: 500,
   faceLossAlertMs: 10000,
   emaTauMs: 80,
-  neutralBand: 1.5, // |S| < 1.5 = 중립
+  neutralBand: 1.5, // |S| < 1.5 = 중립 (보정 전 기본값)
+  // 위 응시 진입 임계값 = upSensitivity × 보정된 위 응시 크기(sUp).
+  // 낮을수록 민감. 보호자 설정에서 실시간 조절 가능.
+  upSensitivity: 0.45,
   driftBetaPerSec: 0.02, // 중립 기준선 적응 속도
   eyeMode: 'both', // 'both' | 'left' | 'right'
 };
@@ -74,18 +78,19 @@ const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 export function extractFeatures(landmarks, blendMap, width, height) {
   const px = (i) => ({ x: landmarks[i].x * width, y: landmarks[i].y * height });
 
-  const eyeGeo = (outerIdx, innerIdx, irisIdx) => {
+  // 눈꼬리 기준선(내안각-외안각)에 대한 임의 점의 부호 있는 수직거리 / 눈 폭.
+  // 이미지 좌표에서 화면 위쪽 = y 감소이므로 부호를 뒤집어 '위 = 양수'가 되게 한다.
+  // 회전/거리 불변.
+  const perpOf = (outerIdx, innerIdx, pointIdx) => {
     const a = px(outerIdx);
     const b = px(innerIdx);
-    const p = px(irisIdx);
+    const p = px(pointIdx);
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const len = Math.hypot(dx, dy);
     if (len < 1e-6) return null;
-    // 부호 있는 수직거리 (이미지 좌표: 외적이 양수면 홍채가 선 아래쪽).
-    // 화면 위쪽 = y 감소이므로 부호를 뒤집어 '위를 보면 양수'가 되게 한다.
     const cross = dx * (p.y - a.y) - dy * (p.x - a.x);
-    return -cross / (len * len); // 눈 폭으로 정규화
+    return -cross / (len * len);
   };
 
   const earOf = (upIdx, downIdx, outerIdx, innerIdx) => {
@@ -98,16 +103,22 @@ export function extractFeatures(landmarks, blendMap, width, height) {
     return Math.hypot(up.x - down.x, up.y - down.y) / w;
   };
 
-  const geoR = eyeGeo(R_OUTER, R_INNER, R_IRIS);
-  const geoL = eyeGeo(L_INNER, L_OUTER, L_IRIS);
+  // 결정 신호는 눈동자(홍채 중심) 기하만 사용한다:
+  // geo    = 홍채 중심이 눈꼬리 기준선 위로 올라간 높이
+  // geoLow = 홍채 중심이 아래 눈꺼풀에서 떨어진 높이 (아래 눈꺼풀은 시선을
+  //          따라 움직이지 않아 안정적인 기준이 된다)
+  const geoR = perpOf(R_OUTER, R_INNER, R_IRIS);
+  const geoL = perpOf(L_INNER, L_OUTER, L_IRIS);
+  const lowLidR = perpOf(R_OUTER, R_INNER, R_LID_DOWN);
+  const lowLidL = perpOf(L_INNER, L_OUTER, L_LID_DOWN);
+  const geoLowR = geoR !== null && lowLidR !== null ? geoR - lowLidR : null;
+  const geoLowL = geoL !== null && lowLidL !== null ? geoL - lowLidL : null;
   const earR = earOf(R_LID_UP, R_LID_DOWN, R_OUTER, R_INNER);
   const earL = earOf(L_LID_UP, L_LID_DOWN, L_INNER, L_OUTER);
 
+  // 블렌드셰이프는 깜빡임 게이트에만 사용 (시선 판정에는 쓰지 않음)
   const blinkR = blendMap.eyeBlinkRight ?? 0;
   const blinkL = blendMap.eyeBlinkLeft ?? 0;
-  const blend =
-    ((blendMap.eyeLookUpLeft ?? 0) + (blendMap.eyeLookUpRight ?? 0)) / 2 -
-    ((blendMap.eyeLookDownLeft ?? 0) + (blendMap.eyeLookDownRight ?? 0)) / 2;
 
   // 얼굴 기울기(roll)와 눈 사이 거리 (설정 화면용)
   const rMid = { x: (px(R_OUTER).x + px(R_INNER).x) / 2, y: (px(R_OUTER).y + px(R_INNER).y) / 2 };
@@ -115,13 +126,14 @@ export function extractFeatures(landmarks, blendMap, width, height) {
   const rollDeg = (Math.atan2(lMid.y - rMid.y, lMid.x - rMid.x) * 180) / Math.PI;
   const interocularPx = Math.hypot(lMid.x - rMid.x, lMid.y - rMid.y);
 
-  return { geoR, geoL, earR, earL, blinkR, blinkL, blend, rollDeg, interocularPx };
+  return { geoR, geoL, geoLowR, geoLowL, earR, earL, blinkR, blinkL, rollDeg, interocularPx };
 }
 
-// 보정 통계로부터 임계값을 계산한다. samples: {center|up: [{geo, blend}...]}
+// 보정 통계를 계산한다. samples: {center|up: [{geo, geoLow, ear}...]}
 // blinkNeutralSamples: 가운데 응시 중의 깜빡임 블렌드셰이프 값들 (게이트 산출용)
+// 임계값 자체는 저장하지 않고 런타임에 민감도 설정 × sUp 으로 계산한다.
 export function computeCalibration(samples, blinkNeutralSamples) {
-  const featureNames = ['geo', 'blend'];
+  const featureNames = ['geo', 'geoLow'];
   const stats = {};
   for (const name of featureNames) {
     stats[name] = {};
@@ -179,7 +191,7 @@ export function computeCalibration(samples, blinkNeutralSamples) {
   };
   const sUp = fusedAt('up');
 
-  if (sUp < 2.5) {
+  if (sUp < 2.0) {
     return {
       ok: false,
       dPrimeUp: sUp,
@@ -188,17 +200,9 @@ export function computeCalibration(samples, blinkNeutralSamples) {
     };
   }
 
-  // 진입 임계값: 기본은 max(0.55·sUp, 3σ)이지만, 신호가 약한 사용자도
-  // 자신의 보정된 위 응시(sUp)로 도달할 수 있도록 0.8·sUp를 넘지 않게 한다.
-  const upEnter = Math.min(Math.max(0.55 * sUp, 3.0), 0.8 * sUp);
-  const upExit = 0.65 * upEnter; // 슈미트 트리거 (진입/이탈 분리)
   const calib = {
     features,
     sUp,
-    upEnter,
-    upExit,
-    // 중립 재장전 구역은 이탈 임계값보다 확실히 안쪽에 둔다
-    neutralBand: Math.min(1.5, 0.7 * upExit),
     // 자연 깜빡임 수준보다 확실히 높은 값을 깜빡임 게이트로 사용
     blinkGate: clamp(percentile(blinkNeutralSamples, 80) + 0.3, 0.5, 0.8),
     neutralEar: median(samples.center.map((s) => s.ear).filter(Number.isFinite)),
@@ -257,8 +261,7 @@ export class EyeTracker extends EventTarget {
       // 손상되었거나 구버전 형식이면 버린다 (첫 프레임 TypeError 방지)
       const valid =
         calib && typeof calib === 'object' &&
-        Number.isFinite(calib.upEnter) && Number.isFinite(calib.upExit) &&
-        calib.upEnter > calib.upExit && calib.upExit > 0 &&
+        Number.isFinite(calib.sUp) && calib.sUp > 0 &&
         calib.features && typeof calib.features === 'object' &&
         Object.values(calib.features).some(
           (f) => f && f.weight > 0 &&
@@ -485,9 +488,18 @@ export class EyeTracker extends EventTarget {
       (earFloor === 0 || feat.earL > earFloor) && Number.isFinite(feat.geoL);
 
     const geoValues = [];
-    if (rValid) geoValues.push(feat.geoR);
-    if (lValid) geoValues.push(feat.geoL);
+    const geoLowValues = [];
+    if (rValid) {
+      geoValues.push(feat.geoR);
+      if (Number.isFinite(feat.geoLowR)) geoLowValues.push(feat.geoLowR);
+    }
+    if (lValid) {
+      geoValues.push(feat.geoL);
+      if (Number.isFinite(feat.geoLowL)) geoLowValues.push(feat.geoLowL);
+    }
     const geo = geoValues.length ? geoValues.reduce((a, b) => a + b, 0) / geoValues.length : NaN;
+    const geoLow = geoLowValues.length
+      ? geoLowValues.reduce((a, b) => a + b, 0) / geoLowValues.length : NaN;
     const ear = (feat.earR + feat.earL) / 2;
 
     const blinkMax = Math.max(
@@ -510,7 +522,7 @@ export class EyeTracker extends EventTarget {
 
     // 보정 샘플 수집 중이면 여기서 끝
     if (this.collecting) {
-      this.#collectFrame(now, { geo, blend: feat.blend, ear, blink: blinkMax, blinkNow });
+      this.#collectFrame(now, { geo, geoLow, ear, blink: blinkMax, blinkNow });
       return;
     }
 
@@ -535,7 +547,7 @@ export class EyeTracker extends EventTarget {
 
     // 원시 융합 점수
     if (!gatedNow) {
-      const rawS = this.#fusedScore({ geo, blend: feat.blend });
+      const rawS = this.#fusedScore({ geo, geoLow });
       this.medianBuf.push(rawS);
       if (this.medianBuf.length > 3) this.medianBuf.shift();
       const med = median(this.medianBuf);
@@ -548,10 +560,10 @@ export class EyeTracker extends EventTarget {
         if (this.driftNeutralSince === 0) this.driftNeutralSince = now;
         if (now - this.driftNeutralSince > 2000) {
           const beta = this.params.driftBetaPerSec * (dt / 1000);
-          for (const name of ['geo', 'blend']) {
+          for (const name of ['geo', 'geoLow']) {
             const f = this.calib.features[name];
             if (f?.weight) {
-              const x = name === 'geo' ? geo : feat.blend;
+              const x = name === 'geo' ? geo : geoLow;
               if (Number.isFinite(x)) f.med += beta * (x - f.med);
             }
           }
@@ -571,15 +583,15 @@ export class EyeTracker extends EventTarget {
         state: this.state,
         progress: this.#dwellProgress(now),
         gated: gatedNow,
-        upEnter: this.calib.upEnter,
+        upEnter: this.#upEnter(),
       },
     }));
   }
 
-  #fusedScore({ geo, blend }) {
+  #fusedScore({ geo, geoLow }) {
     let acc = 0;
     let wSum = 0;
-    for (const [name, x] of [['geo', geo], ['blend', blend]]) {
+    for (const [name, x] of [['geo', geo], ['geoLow', geoLow]]) {
       const f = this.calib.features[name];
       if (!f?.weight || !Number.isFinite(x)) continue;
       acc += f.weight * f.sign * ((x - f.med) / f.sigma);
@@ -605,12 +617,12 @@ export class EyeTracker extends EventTarget {
   }
 
   #zoneOf(S) {
-    return S >= this.calib.upEnter ? 'up' : 'neutral';
+    return S >= this.#upEnter() ? 'up' : 'neutral';
   }
 
   #inZoneSustain(S, zone) {
     // 이탈 임계값 기준 (히스테리시스)
-    return zone === 'up' && S >= this.calib.upExit;
+    return zone === 'up' && S >= this.#upExit();
   }
 
   #dwellProgress(now) {
@@ -620,9 +632,22 @@ export class EyeTracker extends EventTarget {
     return clamp(elapsed / this.params.dwellMs, 0, 1);
   }
 
-  // 보정된 중립 구역 (보정 전이면 기본값)
+  // 임계값은 민감도 설정 × 보정된 위 응시 크기(sUp)에서 매번 계산한다.
+  // 슬라이더 조절이 재보정 없이 즉시 반영된다.
+  #upEnter() {
+    const s = this.calib.sUp;
+    // 하한 2σ: 중립 잡음만으로 시작되지 않게. 상한 0.8·sUp: 약한 신호도 도달 가능하게.
+    return Math.min(Math.max(this.params.upSensitivity * s, 2.0), 0.8 * s);
+  }
+
+  #upExit() {
+    return 0.6 * this.#upEnter(); // 슈미트 트리거 (진입/이탈 분리)
+  }
+
+  // 중립 재장전 구역은 이탈 임계값보다 확실히 안쪽에
   #neutralBand() {
-    return this.calib?.neutralBand ?? this.params.neutralBand;
+    if (!this.calib) return this.params.neutralBand;
+    return Math.min(1.5, 0.7 * this.#upExit());
   }
 
   #dwellMachine(now, gated) {
