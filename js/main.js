@@ -31,7 +31,7 @@ const state = {
   settingsOpen: false,
   settings: {
     confirmMs: 150, retractEnabled: true, ttsRate: 0.95, eyeMode: 'both',
-    scanPeriodMs: 1500,
+    scanPeriodMs: 2200,
     // 위 응시 진입 임계값 = upSensitivity × 보정된 위 응시 크기. 낮을수록 민감.
     upSensitivity: 0.45,
   },
@@ -324,31 +324,45 @@ function render() {
   restartScan();
 }
 
-// ===== 단일 스위치 스캐닝 =====
+// ===== 단일 스위치 스캐닝 (3개 순환: 위 밴드 → 아래 밴드 → 뒤로 가기) =====
 function scanRunning() {
   return state.screen === 'screen-main' && !state.paused && !state.settingsOpen &&
     !state.inputSuspended && !(state.faceLost && !state.usingKeyboard) && state.cycle;
 }
 
-// 빈 밴드는 하이라이트에서 건너뛴다
-function bandHasItems(name) {
+// 뒤로 가기가 실제로 할 일이 있는지
+function canGoBack() {
+  return (state.cycle?.depth ?? 0) > 0 || state.mode !== 'main' || state.undoStack.length > 0;
+}
+
+// 각 스캔 타깃이 지금 선택 가능한지 (빈 밴드/할 일 없는 뒤로가기는 순환에서 제외)
+function targetAvailable(name) {
+  if (name === 'back') return canGoBack();
   return state.cycle && state.cycle.bands[name === 'top' ? 'top' : 'bottom'].length > 0;
 }
 
+const SCAN_ORDER = ['top', 'bottom', 'back'];
+const SCAN_TONES = { top: 520, bottom: 390, back: 300 };
+
 function renderScanHighlight() {
   const active = scanRunning();
-  for (const name of ['top', 'bottom']) {
+  for (const name of SCAN_ORDER) {
     const el = $('#band-' + name);
     const on = active && state.scan.highlight === name;
     el.classList.toggle('scan-on', on);
     el.classList.toggle('scan-off', active && !on);
     const cue = el.querySelector('.band-cue');
-    cue.textContent = on ? '👁 지금 위를 보면 이 칸 선택!' : '잠시 후 이 칸 차례';
+    if (name === 'back') {
+      el.classList.toggle('inactive', !canGoBack());
+      cue.textContent = on ? '👁 지금 위를 보면 뒤로!' : (canGoBack() ? '잠시 후 이 칸 차례' : '');
+    } else {
+      cue.textContent = on ? '👁 지금 위를 보면 이 칸 선택!' : '잠시 후 이 칸 차례';
+    }
   }
 }
 
 function restartScan() {
-  state.scan.highlight = bandHasItems('top') ? 'top' : 'bottom';
+  state.scan.highlight = SCAN_ORDER.find(targetAvailable) ?? 'top';
   state.scan.lastFlip = performance.now();
   state.scan.frozen = false;
   state.scan.captured = null;
@@ -356,10 +370,16 @@ function restartScan() {
 }
 
 function flipScan() {
-  const next = state.scan.highlight === 'top' ? 'bottom' : 'top';
-  if (bandHasItems(next)) {
-    state.scan.highlight = next;
-    tone(next === 'top' ? 520 : 390, 60, 0.03); // 구분되는 짧은 틱
+  const idx = SCAN_ORDER.indexOf(state.scan.highlight);
+  for (let step = 1; step <= SCAN_ORDER.length; step++) {
+    const next = SCAN_ORDER[(idx + step) % SCAN_ORDER.length];
+    if (targetAvailable(next)) {
+      if (next !== state.scan.highlight) {
+        state.scan.highlight = next;
+        tone(SCAN_TONES[next], 60, 0.03); // 구분되는 짧은 틱
+      }
+      break;
+    }
   }
   state.scan.lastFlip = performance.now();
   renderScanHighlight();
@@ -549,10 +569,33 @@ function onAnswer() {
   const band = state.scan.captured ?? state.scan.highlight;
   state.scan.frozen = false;
   state.scan.captured = null;
+  if (band === 'back') {
+    goBack();
+    restartScan();
+    return;
+  }
   (band === 'top' ? sounds.up : sounds.down)();
   const res = state.cycle.answer(band === 'top' ? 'up' : 'down');
   if (res.done) onSelect(res.item);
   else render();
+}
+
+// 뒤로 가기: 트리 한 단계 위 → 메뉴 취소 → 마지막 입력 되돌리기 순
+function goBack() {
+  sounds.undo();
+  if (state.cycle.depth > 0) {
+    state.cycle.back();
+    render();
+    toast('한 단계 되돌렸어요');
+  } else if (state.mode !== 'main') {
+    setMode('main');
+    toast('취소했어요');
+  } else if (restoreSnapshot()) {
+    setMode('main');
+    toast('마지막 입력을 되돌렸어요');
+  } else {
+    toast('되돌릴 것이 없어요');
+  }
 }
 
 // 시선을 올리기 시작하면 하이라이트 전환을 멈춰서
@@ -572,26 +615,18 @@ function onDwellAbort() {
 function onRetract() {
   if (state.inputSuspended || state.paused || state.settingsOpen) return;
   if (state.screen !== 'screen-main') return;
-  sounds.undo();
-  if (state.cycle.depth > 0) {
-    state.cycle.back();
-    render();
-    toast('한 단계 되돌렸어요');
-  } else if (state.mode !== 'main') {
-    setMode('main');
-    toast('취소했어요');
-  } else if (restoreSnapshot()) {
-    setMode('main');
-    toast('마지막 입력을 되돌렸어요');
-  }
+  goBack();
 }
 
 // ===== 시선 시각화 =====
 function bindGazeVisuals(tracker) {
   const needle = $('#gauge .needle');
   const zoneUp = $('#gauge .zone-up');
-  const fillTop = $('#band-top .fill');
-  const fillBottom = $('#band-bottom .fill');
+  const fills = {
+    top: $('#band-top .fill'),
+    bottom: $('#band-bottom .fill'),
+    back: $('#band-back .fill'),
+  };
   const bandTop = $('#band-top');
   const bandBottom = $('#band-bottom');
 
@@ -606,11 +641,12 @@ function bindGazeVisuals(tracker) {
     zoneUp.style.top = '0';
     zoneUp.style.height = `${(((max - upEnter) / (max - min)) * 100).toFixed(1)}%`;
 
-    // 체류 진행도는 '제스처 시작 시점에 켜져 있던' 밴드에 표시
+    // 확인 진행도는 '제스처 시작 시점에 켜져 있던' 칸에 표시
     const inDwell = st === 'dwell' && zone === 'up';
     const band = state.scan.captured ?? state.scan.highlight;
-    fillTop.style.transform = `scaleY(${inDwell && band === 'top' ? progress : 0})`;
-    fillBottom.style.transform = `scaleY(${inDwell && band === 'bottom' ? progress : 0})`;
+    for (const [name, el] of Object.entries(fills)) {
+      el.style.transform = `scaleY(${inDwell && band === name ? progress : 0})`;
+    }
     const engaged = st === 'dwell' || st === 'debounce';
     bandTop.classList.toggle('hot-top', engaged && band === 'top');
     bandBottom.classList.toggle('hot-bottom', engaged && band === 'bottom');
@@ -864,7 +900,7 @@ function loadSettings() {
   const num = (v, lo, hi, dflt) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt);
   s.confirmMs = num(s.confirmMs, 80, 800, 150);
   delete s.dwellMs; // 구버전 설정 키 제거
-  s.scanPeriodMs = num(s.scanPeriodMs, 600, 4000, 1500);
+  s.scanPeriodMs = num(s.scanPeriodMs, 800, 4000, 2200);
   s.ttsRate = num(s.ttsRate, 0.5, 1.6, 0.95);
   s.upSensitivity = num(s.upSensitivity, 0.3, 0.7, 0.45);
   s.retractEnabled = s.retractEnabled !== false;

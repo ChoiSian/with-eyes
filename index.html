@@ -90,6 +90,11 @@
         <div class="fill"></div>
         <div class="band-cue">잠시 후 이 칸 차례</div>
       </div>
+      <div id="band-back" class="band band-back">
+        <div class="fill"></div>
+        <div class="band-cue">잠시 후 이 칸 차례</div>
+        <div class="back-label">↩ 뒤로 가기 · 되돌리기</div>
+      </div>
     </div>
     <div id="gauge">
       <div class="zone-up"></div>
@@ -100,7 +105,7 @@
       <video id="mini-cam" autoplay playsinline muted></video>
       <span id="fps-label"></span>
       <span class="spacer"></span>
-      <span class="sub" style="font-size:15px">불 켜진 칸에서 위를 보면 선택 · 계속 응시하면 취소 · 두 눈 3초 감으면 쉬기</span>
+      <span class="sub" style="font-size:15px">불이 위·아래·뒤로 칸을 차례로 돕니다 · 원하는 칸에 불이 오면 위를 보세요 · 두 눈 3초 감으면 쉬기</span>
       <button id="btn-settings" class="gear-btn" title="보호자 설정">⚙️</button>
     </div>
   </section>
@@ -139,7 +144,7 @@
       </div>
       <div class="settings-row">
         <span>칸 전환 속도 (하이라이트)</span>
-        <span><input type="range" id="set-scan" min="800" max="2500" step="100" />
+        <span><input type="range" id="set-scan" min="1000" max="4000" step="200" />
           <span id="set-scan-val"></span></span>
       </div>
       <div class="settings-row">

@@ -287,6 +287,24 @@ video#camera {
 
 .band.scan-off { opacity: 0.45; }
 
+/* 뒤로 가기 밴드: 얇은 가로 바, 보라 계열 */
+.band-back {
+  flex: 0 0 auto;
+  min-height: 74px;
+  border-color: color-mix(in srgb, #b07cff 55%, var(--tile-border));
+}
+
+.band-back .fill { background: color-mix(in srgb, #b07cff 26%, transparent); }
+
+.band-back .back-label {
+  font-size: clamp(22px, 3.6vh, 34px);
+  font-weight: 700;
+  color: #cfb2ff;
+}
+
+/* 되돌릴 것이 없을 때: 흐리게 표시하고 순환에서 제외 */
+.band-back.inactive { opacity: 0.22; }
+
 .band-cue {
   position: absolute;
   top: 8px;
@@ -514,7 +532,7 @@ video#camera {
 .toast {
   position: absolute;
   left: 50%;
-  bottom: 90px;
+  bottom: 180px; /* 뒤로 가기 칸을 가리지 않게 */
   transform: translateX(-50%);
   background: var(--panel-2);
   border: 2px solid var(--tile-border);
@@ -555,6 +573,9 @@ video#camera {
   .tile { padding: 6px 11px; border-radius: 9px; }
 
   #gauge { width: 32px; right: 6px; top: 84px; bottom: 52px; }
+
+  .band-back { min-height: 52px; }
+  .band-back .back-label { font-size: clamp(17px, 2.8vh, 26px); }
 
   .statusbar { font-size: 13px; gap: 8px; padding: 5px 8px; }
   .statusbar .sub { display: none; }
