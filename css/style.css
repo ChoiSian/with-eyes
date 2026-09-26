@@ -1,5 +1,5 @@
-/* 눈으로 — 시선 AAC. 어두운 배경 + 고대비, 큰 글자.
-   위 밴드 = 위를 본다, 아래 밴드 = 아래를 본다. 색만으로 구분하지 않는다. */
+/* 손끝으로 — 터치 AAC. 어두운 배경 + 고대비, 큰 글자.
+   화면의 위/아래 두 칸 중 원하는 쪽을 누르면 선택지가 절반으로 줄어든다. */
 
 :root {
   --bg: #0e1117;
@@ -7,10 +7,9 @@
   --panel-2: #1e2532;
   --text: #f2f5f9;
   --text-dim: #9aa7b8;
-  --top-accent: #37b7ff;   /* 위 밴드 (파랑) */
-  --bottom-accent: #ffb020; /* 아래 밴드 (주황) */
+  --top-accent: #37b7ff;   /* 위 칸 (파랑) */
+  --bottom-accent: #ffb020; /* 아래 칸 (주황) */
   --ok: #3ddc84;
-  --scan: #3ddc84; /* 하이라이트(선택 가능) 색 */
   --warn: #ff5d5d;
   --tile-bg: #232b3a;
   --tile-border: #35415a;
@@ -65,136 +64,22 @@ button.primary:hover { background: #1668c2; }
   inset: 0;
   display: none;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 22px;
-  padding: 28px;
-  text-align: center;
+  align-items: stretch;
+  justify-content: stretch;
 }
 
 .screen.active { display: flex; }
 
-h1 { font-size: 44px; margin: 0; }
 h2 { font-size: 30px; margin: 0; }
 
 .sub { color: var(--text-dim); font-size: 20px; max-width: 720px; line-height: 1.6; }
 
-.checklist {
-  text-align: left;
-  color: var(--text-dim);
-  font-size: 19px;
-  line-height: 2;
-  background: var(--panel);
-  border-radius: var(--radius);
-  padding: 18px 30px;
-}
-
-.warn-box {
-  background: #3a2431;
-  border: 1px solid var(--warn);
-  color: #ffc9c9;
-  padding: 12px 20px;
-  border-radius: 12px;
-  max-width: 720px;
-  display: none;
-}
-
-.warn-box.show { display: block; }
-
-.btn-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
-
-/* ===== 설정(카메라) 화면 ===== */
-.setup-grid {
-  display: flex;
-  gap: 28px;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-
-video#camera {
-  width: min(560px, 60vw);
-  border-radius: var(--radius);
-  transform: scaleX(-1);
-  background: #000;
-}
-
-.setup-status {
-  text-align: left;
-  font-size: 21px;
-  line-height: 2.1;
-  background: var(--panel);
-  padding: 18px 26px;
-  border-radius: var(--radius);
-  min-width: 300px;
-}
-
-.setup-status .bad { color: var(--warn); }
-.setup-status .good { color: var(--ok); }
-
-/* ===== 보정 화면 ===== */
-#screen-calib { justify-content: stretch; }
-
-.calib-stage {
-  position: relative;
-  flex: 1;
-  width: 100%;
-}
-
-.calib-dot {
-  position: absolute;
-  left: 50%;
-  width: 76px;
-  height: 76px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #7fd4ff, #1259a6);
-  border: 6px solid #d9f1ff;
-  transform: translate(-50%, -50%);
-  transition: top 0.6s ease;
-  box-shadow: 0 0 40px rgba(55, 183, 255, 0.7);
-}
-
-.calib-dot.pulse { animation: pulse 1s infinite alternate; }
-
-@keyframes pulse {
-  from { transform: translate(-50%, -50%) scale(1); }
-  to { transform: translate(-50%, -50%) scale(1.25); }
-}
-
-#calib-label {
-  font-size: 34px;
-  font-weight: 700;
-}
-
-#calib-progress { color: var(--text-dim); font-size: 22px; }
-
-/* ===== 연습 화면 ===== */
-.practice-prompt {
-  font-size: 60px;
-  font-weight: 800;
-}
-
-.practice-arrow { font-size: 110px; line-height: 1; }
-
-.practice-result { font-size: 26px; color: var(--text-dim); }
-
-/* ===== 메인 화면 ===== */
-#screen-main {
-  display: none;
-  padding: 0;
-  gap: 0;
-  justify-content: stretch;
-  align-items: stretch;
-  text-align: left;
-}
-
-#screen-main.active { display: flex; }
-
+/* ===== 문장 표시 ===== */
 .sentence-bar {
   background: var(--panel);
   padding: 14px 26px;
   min-height: calc(var(--sentence-size) * 1.5);
-  max-height: 24vh; /* 긴 문장이 밴드를 눌러 타일이 잘리는 것 방지 */
+  max-height: 24vh; /* 긴 문장이 칸을 눌러 타일이 잘리는 것 방지 */
   overflow-y: auto;
   display: flex;
   align-items: center;
@@ -234,12 +119,13 @@ video#camera {
   white-space: nowrap;
 }
 
+/* ===== 두 선택 칸 + 삭제 버튼 ===== */
 .bands {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 14px 90px 14px 14px; /* 오른쪽에 게이지 공간 */
+  padding: 14px;
   min-height: 0;
 }
 
@@ -254,56 +140,24 @@ video#camera {
   align-content: center;
   justify-content: center;
   gap: 12px;
-  padding: 16px 20px;
+  padding: 34px 20px 16px;
   overflow: hidden;
   min-height: 0;
-}
-
-.band .fill {
-  position: absolute;
-  inset: 0;
-  transform-origin: bottom;
-  transform: scaleY(0);
-  pointer-events: none;
-  transition: transform 0.05s linear;
+  cursor: pointer;
 }
 
 .band-top { border-color: color-mix(in srgb, var(--top-accent) 55%, var(--tile-border)); }
 .band-bottom { border-color: color-mix(in srgb, var(--bottom-accent) 55%, var(--tile-border)); }
 
-.band-top .fill { background: color-mix(in srgb, var(--top-accent) 26%, transparent); transform-origin: top; }
-.band-bottom .fill { background: color-mix(in srgb, var(--bottom-accent) 26%, transparent); }
-
-.band.hot-top { box-shadow: 0 0 0 4px var(--top-accent) inset; }
-.band.hot-bottom { box-shadow: 0 0 0 4px var(--bottom-accent) inset; }
-
-/* 단일 스위치 스캐닝: 하이라이트가 켜진 밴드 */
-.band.scan-on {
-  border-color: var(--scan);
-  box-shadow: 0 0 0 3px var(--scan), 0 0 34px rgba(61, 220, 132, 0.35);
+.band:active {
+  transform: scale(0.99);
+  background: #202940;
 }
 
-.band.scan-on .band-cue { color: var(--scan); font-size: 19px; }
+.band-top:active { box-shadow: 0 0 0 4px var(--top-accent) inset; }
+.band-bottom:active { box-shadow: 0 0 0 4px var(--bottom-accent) inset; }
 
-.band.scan-off { opacity: 0.45; }
-
-/* 뒤로 가기 밴드: 얇은 가로 바, 보라 계열 */
-.band-back {
-  flex: 0 0 auto;
-  min-height: 74px;
-  border-color: color-mix(in srgb, #b07cff 55%, var(--tile-border));
-}
-
-.band-back .fill { background: color-mix(in srgb, #b07cff 26%, transparent); }
-
-.band-back .back-label {
-  font-size: clamp(22px, 3.6vh, 34px);
-  font-weight: 700;
-  color: #cfb2ff;
-}
-
-/* 되돌릴 것이 없을 때: 흐리게 표시하고 순환에서 제외 */
-.band-back.inactive { opacity: 0.22; }
+.band.empty { opacity: 0.3; pointer-events: none; }
 
 .band-cue {
   position: absolute;
@@ -313,6 +167,7 @@ video#camera {
   font-weight: 700;
   color: var(--text-dim);
   letter-spacing: 0.06em;
+  pointer-events: none;
 }
 
 .band-top .band-cue { color: var(--top-accent); }
@@ -329,26 +184,44 @@ video#camera {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none; /* 칸 전체가 하나의 버튼 */
 }
 
 .tile.small { font-size: calc(var(--tile-size) * 0.72); }
+.tile.action { background: #1c3149; border-color: #2f5f8f; }
+.tile.suggestion { background: #203a2b; border-color: #3f7d55; }
 
-/* 항목이 많은 밴드는 타일을 축소해 모두 보이게 */
-.band.dense { gap: 7px; padding: 26px 12px 10px; }
+/* 항목이 많은 칸은 타일을 축소해 모두 보이게 */
+.band.dense { gap: 7px; padding: 30px 12px 10px; }
 .band.dense .tile {
   font-size: calc(var(--tile-size) * 0.62);
   padding: 4px 10px;
   border-radius: 9px;
 }
-.tile.action { background: #1c3149; border-color: #2f5f8f; }
-.tile.suggestion { background: #203a2b; border-color: #3f7d55; }
 
-/* 항목이 하나만 남은 밴드 강조 */
+/* 항목이 하나만 남은 칸 강조 */
 .band.single .tile {
   font-size: calc(var(--tile-size) * 1.5);
   padding: 18px 34px;
 }
 
+/* 삭제 버튼 (넓은 가로 바) */
+.delete-bar {
+  flex: 0 0 auto;
+  min-height: 78px;
+  border-radius: var(--radius);
+  border: 4px solid color-mix(in srgb, var(--warn) 55%, var(--tile-border));
+  background: var(--panel);
+  color: #ffb3b3;
+  font-size: clamp(24px, 3.8vh, 36px);
+  font-weight: 700;
+}
+
+.delete-bar:hover { background: #2a1e28; }
+.delete-bar:active { transform: scale(0.99); box-shadow: 0 0 0 4px var(--warn) inset; }
+.delete-bar.inactive { opacity: 0.25; }
+
+/* ===== 상태바 ===== */
 .statusbar {
   display: flex;
   align-items: center;
@@ -360,68 +233,17 @@ video#camera {
   color: var(--text-dim);
 }
 
-.statusbar .dot {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--warn);
-  margin-right: 6px;
-}
-
-.statusbar .dot.ok { background: var(--ok); }
-
-#mini-cam {
-  width: 96px;
-  height: 54px; /* 스트림 없을 때 기본 150px로 상태바가 커지는 것 방지 */
-  object-fit: cover;
-  border-radius: 8px;
-  transform: scaleX(-1);
-  background: #000;
-}
-
+.statusbar .app-name { font-weight: 700; color: var(--text); }
 .statusbar .spacer { flex: 1; }
 
-/* 시선 게이지 (오른쪽 세로) */
-#gauge {
-  position: absolute;
-  right: 14px;
-  top: 110px;
-  bottom: 70px;
-  width: 56px;
-  background: var(--panel);
-  border: 2px solid var(--tile-border);
-  border-radius: 14px;
-  overflow: hidden;
+.gear-btn {
+  border: none;
+  background: transparent;
+  font-size: 26px;
+  padding: 4px 10px;
 }
 
-#gauge .zone-up, #gauge .zone-down {
-  position: absolute;
-  left: 0;
-  right: 0;
-  background: rgba(55, 183, 255, 0.15);
-  border-bottom: 2px dashed var(--top-accent);
-}
-
-#gauge .zone-down {
-  background: rgba(255, 176, 32, 0.15);
-  border-top: 2px dashed var(--bottom-accent);
-  border-bottom: none;
-}
-
-#gauge .needle {
-  position: absolute;
-  left: 4px;
-  right: 4px;
-  height: 10px;
-  border-radius: 5px;
-  background: var(--text);
-  transition: top 0.06s linear;
-}
-
-#gauge .needle.gated { background: var(--text-dim); }
-
-/* 선택 에코 */
+/* ===== 선택 에코 ===== */
 #echo {
   position: absolute;
   inset: 0;
@@ -448,7 +270,7 @@ video#camera {
   white-space: nowrap;
 }
 
-/* 오버레이 (일시정지/얼굴소실/말하는 중) */
+/* ===== 오버레이 (말하는 중) ===== */
 .overlay {
   position: absolute;
   inset: 0;
@@ -468,14 +290,7 @@ video#camera {
 .overlay h2 { font-size: 44px; }
 .overlay .sub { font-size: 24px; }
 
-#overlay-pause .pattern {
-  font-size: 30px;
-  letter-spacing: 0.1em;
-  color: var(--top-accent);
-  font-weight: 700;
-}
-
-/* 설정 모달 (보호자용, 마우스 조작) */
+/* ===== 설정 모달 ===== */
 #settings {
   position: absolute;
   inset: 0;
@@ -513,26 +328,11 @@ video#camera {
 
 .settings-row input[type='range'] { width: 220px; }
 
-.settings-row select, .settings-row input[type='number'] {
-  font: inherit;
-  background: var(--panel-2);
-  color: inherit;
-  border: 1px solid var(--tile-border);
-  border-radius: 8px;
-  padding: 6px 10px;
-}
-
-.gear-btn {
-  border: none;
-  background: transparent;
-  font-size: 26px;
-  padding: 4px 10px;
-}
-
+/* ===== 토스트 ===== */
 .toast {
   position: absolute;
   left: 50%;
-  bottom: 180px; /* 뒤로 가기 칸을 가리지 않게 */
+  bottom: 150px;
   transform: translateX(-50%);
   background: var(--panel-2);
   border: 2px solid var(--tile-border);
@@ -554,48 +354,28 @@ video#camera {
     --radius: 12px;
   }
 
-  h1 { font-size: 32px; }
-  h2 { font-size: 24px; }
   .sub { font-size: 16px; }
-  .checklist { font-size: 15px; padding: 12px 16px; line-height: 1.8; }
   button { font-size: 17px; padding: 10px 16px; }
-  .screen { padding: 16px; gap: 14px; }
 
   .sentence-bar { padding: 10px 12px; gap: 8px; }
   .sentence-hint { display: none; }
 
-  .bands { padding: 8px 46px 8px 8px; gap: 8px; }
-  .band { gap: 7px; padding: 24px 8px 8px; border-width: 3px; }
-  .band.dense { gap: 5px; padding: 22px 6px 6px; }
+  .bands { padding: 8px; gap: 8px; }
+  .band { gap: 7px; padding: 28px 8px 8px; border-width: 3px; }
+  .band.dense { gap: 5px; padding: 24px 6px 6px; }
   .band.dense .tile { padding: 3px 7px; }
   .band-cue { font-size: 12px; top: 5px; left: 8px; }
-  .band.scan-on .band-cue { font-size: 13px; }
   .tile { padding: 6px 11px; border-radius: 9px; }
 
-  #gauge { width: 32px; right: 6px; top: 84px; bottom: 52px; }
-
-  .band-back { min-height: 52px; }
-  .band-back .back-label { font-size: clamp(17px, 2.8vh, 26px); }
+  .delete-bar { min-height: 58px; font-size: clamp(19px, 3vh, 28px); }
 
   .statusbar { font-size: 13px; gap: 8px; padding: 5px 8px; }
   .statusbar .sub { display: none; }
-  #mini-cam { width: 60px; height: 34px; }
 
   #echo .echo-text { font-size: clamp(36px, 9vh, 76px); padding: 16px 26px; border-radius: 16px; }
 
   .overlay h2 { font-size: 30px; }
   .overlay .sub { font-size: 17px; }
-  #overlay-pause .pattern { font-size: 24px; }
-
-  .practice-arrow { font-size: 76px; }
-  .practice-prompt { font-size: 34px; }
-
-  video#camera { width: min(92vw, 480px); }
-  .setup-grid { gap: 14px; }
-  .setup-status { font-size: 16px; line-height: 1.9; min-width: 0; width: min(92vw, 480px); }
-
-  .calib-dot { width: 58px; height: 58px; border-width: 4px; }
-  #calib-label { font-size: 24px; }
 
   .settings-panel { padding: 16px 18px; }
   .settings-row { font-size: 16px; flex-wrap: wrap; }
